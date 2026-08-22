@@ -318,7 +318,7 @@ jobs:
         # The attestation is what lets a deployment gate check that the image
         # it is about to run was produced by this pipeline from this commit,
         # rather than pushed by someone with registry credentials.
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/specforge-${{ matrix.component }}
           subject-digest: ${{ steps.push.outputs.digest }}
