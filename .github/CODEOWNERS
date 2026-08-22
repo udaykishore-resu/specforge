@@ -1,0 +1,30 @@
+# Code owners.
+#
+# The list is short on purpose. Ownership here is not about territory; it is
+# about making sure the parts of the platform that other parts trust are not
+# changed without someone who understands what depends on them.
+
+*                               @udaykishoreresu
+
+# The security and governance core. A mistake in any of these does not fail
+# loudly — it silently stops enforcing something.
+/internal/platform/authz/       @udaykishoreresu
+/internal/platform/authn/       @udaykishoreresu
+/internal/platform/jcs/         @udaykishoreresu
+/internal/platform/hash/        @udaykishoreresu
+/internal/audit/                @udaykishoreresu
+/internal/artifactgraph/domain/ @udaykishoreresu
+
+# Schema changes are forward-only and carry the tenancy and immutability
+# guarantees in their constraints and triggers.
+/migrations/                    @udaykishoreresu
+/test/isolation/                @udaykishoreresu
+
+# The published contract, and the test that keeps it honest.
+/api/openapi/                   @udaykishoreresu
+/test/contract/                 @udaykishoreresu
+
+# Anything that decides what runs in production.
+/.github/workflows/             @udaykishoreresu
+/ci/                            @udaykishoreresu
+/deploy/                        @udaykishoreresu

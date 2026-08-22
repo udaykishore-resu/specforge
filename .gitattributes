@@ -1,0 +1,18 @@
+# Normalise line endings so a checkout on Windows does not rewrite every file
+# and make the next diff unreadable.
+* text=auto eol=lf
+
+*.go      text diff=golang
+*.sql     text
+*.md      text diff=markdown
+*.yaml    text
+*.yml     text
+*.tf      text
+*.sh      text eol=lf
+*.png     binary
+*.jpg     binary
+*.ico     binary
+
+# Generated or vendored files: keep them out of diffs and language statistics.
+web/package-lock.json linguist-generated=true -diff
+docs/**              linguist-documentation=true

@@ -1,0 +1,69 @@
+{{- if .Values.networkPolicy.enabled }}
+# Default-deny for the platform's pods, with egress opened only to what they
+# actually need.
+#
+# The reasoning is specific to what this platform holds. A tenant's
+# specifications, architecture and approval evidence are among the most
+# sensitive things an engineering organization owns, and an exploited
+# dependency inside the API pod would otherwise have unrestricted outbound
+# network access to send them anywhere.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "specforge.fullname" . }}-default-deny
+  labels:
+    {{- include "specforge.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "specforge.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # The console reaches the API; the ingress controller reaches both.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "specforge.selectorLabels" . | nindent 14 }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 3000
+    # Prometheus scrapes metrics.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: {{ .Values.networkPolicy.dnsPort }}
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.dnsPort }}
+    # Within the release: the console calls the API.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "specforge.selectorLabels" . | nindent 14 }}
+    {{- with .Values.networkPolicy.allowedEgressCIDRs }}
+    # The datastores, identity provider and object storage, named explicitly.
+    - to:
+        {{- range . }}
+        - ipBlock:
+            cidr: {{ . }}
+        {{- end }}
+    {{- end }}
+{{- end }}

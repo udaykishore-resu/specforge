@@ -1,0 +1,192 @@
+{
+  "title": "SpecForge — Governance & Integrity",
+  "uid": "specforge-governance",
+  "tags": ["specforge", "governance"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "description": "The controls, not the machines. Each panel answers whether a governance guarantee is still holding.",
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Audit chain valid",
+      "description": "1 means the last verification of this tenant's hash chain succeeded. Anything else is a suspected tampering incident, not a bug.",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "targets": [{ "expr": "min(sf_audit_chain_valid)", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "BROKEN", "color": "red", "index": 0 } } },
+            { "type": "value", "options": { "1": { "text": "VALID", "color": "green", "index": 1 } } }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Time since last anchor",
+      "description": "Anchoring is what makes the chain externally verifiable. A stalled anchor leaves a rewrite of history with nothing to contradict it.",
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 0 },
+      "targets": [
+        { "expr": "time() - max(sf_audit_last_anchor_timestamp_seconds)", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 3600 },
+              { "color": "red", "value": 7200 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Outbox pending",
+      "description": "Events written in the same transaction as their state change, awaiting publication. Non-zero is normal; growing is not.",
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 0 },
+      "targets": [{ "expr": "sum(sf_outbox_pending)", "refId": "A" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 500 },
+              { "color": "red", "value": 1000 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Content hash mismatches (1h)",
+      "description": "Reads where stored bytes did not match the recorded hash. The read failed closed. Any non-zero value needs investigation of the storage layer.",
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "targets": [
+        { "expr": "sum(increase(sf_content_hash_mismatch_total[1h])) or vector(0)", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Approvals sealed",
+      "description": "Each point is a version that passed governance gates, four-eyes and step-up, and was written to write-once evidence storage.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "targets": [
+        {
+          "expr": "sum by (artifact_type) (rate(sf_approvals_total[5m]))",
+          "legendFormat": "{{artifact_type}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Authorization refusals by code",
+      "description": "Four-eyes violations and step-up demands are expected in small numbers. A sustained rise means either a misconfigured grant or someone testing the approval path.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "targets": [
+        {
+          "expr": "sum by (code) (rate(sf_http_errors_total{code=~\"authz.*\"}[5m]))",
+          "legendFormat": "{{code}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Audit records written",
+      "description": "By action and outcome. A DENIED outcome is recorded as deliberately as a SUCCESS: refusals are evidence too.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(sf_audit_records_total[5m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Trace links by origin",
+      "description": "LLM_PROPOSED links cannot reach ACCEPTED without a recorded human disposition. This panel shows how much of the graph the model is proposing versus how much people are accepting.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "targets": [
+        {
+          "expr": "sum by (origin, status) (rate(sf_trace_links_total[5m]))",
+          "legendFormat": "{{origin}} / {{status}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Approval latency (p50, p95, p99)",
+      "description": "The approval path writes canonical content and evidence to object storage before sealing the row, so this tracks the object store as much as the database.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(sf_http_request_duration_seconds_bucket{route=~\".*approve.*\"}[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(sf_http_request_duration_seconds_bucket{route=~\".*approve.*\"}[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(sf_http_request_duration_seconds_bucket{route=~\".*approve.*\"}[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Request rate and errors",
+      "description": "Overall API health, for context beneath the governance panels.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "targets": [
+        {
+          "expr": "sum(rate(sf_http_requests_total[5m]))",
+          "legendFormat": "requests",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(sf_http_requests_total{status=~\"5..\"}[5m]))",
+          "legendFormat": "5xx",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    }
+  ]
+}

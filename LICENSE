@@ -1,0 +1,31 @@
+SpecForge — Proprietary License
+
+Copyright (c) 2026 Udaykishore Resu. All rights reserved.
+
+This software and its accompanying documentation (the "Software") are
+proprietary and confidential.
+
+Permission is granted to the copyright holder and to parties explicitly
+authorised in writing by the copyright holder to use, copy, modify and deploy
+the Software. No other licence is granted, expressly or by implication.
+
+Without prior written permission you may not:
+
+  * redistribute the Software or any substantial portion of it, in source or
+    object form;
+  * offer the Software as a hosted or managed service to third parties;
+  * remove or alter this notice.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Note on evidence and audit records: nothing in this licence limits the ability
+of a party who lawfully holds SpecForge data to inspect, export or
+independently verify their own artifacts, approval evidence and audit trail.
+The verification tooling in cmd/specforge-cli exists so that such verification
+does not require the copyright holder's cooperation, and that is deliberate.

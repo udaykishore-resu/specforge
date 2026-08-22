@@ -1,0 +1,65 @@
+#!/bin/sh
+# SpecForge pre-commit hook.
+#
+# Fast checks only. A hook that takes a minute is a hook people disable, and a
+# disabled hook protects nothing — so the slow work (integration tests, database
+# invariants) stays in `make check` and in CI.
+#
+# Install with: make hooks
+
+set -e
+
+red()  { printf '\033[31m%s\033[0m\n' "$1"; }
+info() { printf '\033[2m%s\033[0m\n' "$1"; }
+
+staged_go=$(git diff --cached --name-only --diff-filter=ACM | grep '\.go$' || true)
+
+if [ -n "$staged_go" ]; then
+  info "pre-commit: gofmt"
+  unformatted=$(gofmt -l -s $staged_go || true)
+  if [ -n "$unformatted" ]; then
+    red "These files are not formatted. Run 'make fmt' and stage the result:"
+    echo "$unformatted"
+    exit 1
+  fi
+
+  info "pre-commit: go vet"
+  if ! go vet ./... >/dev/null 2>&1; then
+    red "go vet failed. Run 'make vet' to see why."
+    exit 1
+  fi
+
+  info "pre-commit: route authorization"
+  if ! go run ./tools/lintroutes >/dev/null; then
+    red "A route declares no permission, or the public surface changed."
+    red "Run 'make lint-routes' for the detail."
+    exit 1
+  fi
+fi
+
+# A secret committed once is a secret leaked, even if the next commit removes
+# it. This catches the obvious shapes; it is not a substitute for gitleaks in
+# CI, and it is not a reason to relax about what you paste into a file.
+#
+# The scan skips .githooks/ — otherwise this file's own pattern list matches
+# itself, and the first thing a new contributor learns about the hook is how to
+# bypass it. A scanner that cries wolf on its own source teaches exactly the
+# wrong habit.
+info "pre-commit: obvious secrets"
+
+secret_patterns='BEGIN [A-Z ]*PRIVATE KEY|aws_secret_access_key *= *[A-Za-z0-9/+]{20,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{36}|xox[baprs]-[A-Za-z0-9-]{10,}'
+allow='example|placeholder|dummy|sample|specforge-dev-secret|not-used-at-runtime|change-me|your-|REDACTED'
+
+for file in $(git diff --cached --name-only --diff-filter=ACM); do
+  case "$file" in
+    .githooks/*|*.md) continue ;;
+  esac
+  if git diff --cached -U0 -- "$file" \
+      | grep '^+' | grep -viE "$allow" | grep -qiE "$secret_patterns"; then
+    red "$file looks like it contains a credential. Refusing the commit."
+    red "If it is a false positive, commit with --no-verify and say so in review."
+    exit 1
+  fi
+done
+
+exit 0

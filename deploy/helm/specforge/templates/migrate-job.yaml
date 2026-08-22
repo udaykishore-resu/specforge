@@ -1,0 +1,70 @@
+{{- if .Values.database.runMigrations }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "specforge.fullname" . }}-migrate-{{ .Release.Revision }}
+  labels:
+    {{- include "specforge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+  annotations:
+    # Migrations run before the new pods start, and the release fails if they
+    # do. A rollout that begins serving against a schema it was not built for
+    # is how an approval path breaks in production for reasons nobody can see.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  # Migrations are transactional and idempotent; a retry after an infrastructure
+  # blip is safe, but a genuine failure should surface quickly rather than being
+  # retried into a timeout.
+  backoffLimit: 2
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        {{- include "specforge.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "specforge.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          # The worker image carries the migrator, so the migration always runs
+          # the binary built from the same commit as the release.
+          image: {{ include "specforge.image" (dict "root" . "component" "specforge-worker" "tag" .Values.worker.tag) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/specforge-migrate", "up"]
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            - name: SF_ENV
+              value: {{ .Values.environment | quote }}
+            - name: SF_LOG_FORMAT
+              value: json
+            - name: SF_DB_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: {{ .Values.database.dsnKey }}
+            - name: SF_DB_MIGRATIONS_DIR
+              value: /app/migrations
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

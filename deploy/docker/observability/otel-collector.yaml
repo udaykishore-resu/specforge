@@ -1,0 +1,74 @@
+# OpenTelemetry collector for the local stack.
+#
+# The redaction processor is not decoration. Traces from a governance platform
+# carry tenant identifiers, principal identifiers and artifact titles, and a
+# trace backend is usually a less-protected system than the platform itself.
+# Attributes that could carry content or credentials are dropped here, at the
+# edge, rather than trusted not to be recorded upstream.
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 512
+
+  memory_limiter:
+    check_interval: 2s
+    limit_mib: 384
+    spike_limit_mib: 96
+
+  attributes/redact:
+    actions:
+      # Never let a credential or a payload reach the trace store.
+      - key: http.request.header.authorization
+        action: delete
+      - key: http.request.header.cookie
+        action: delete
+      - key: http.response.header.set-cookie
+        action: delete
+      - key: db.statement.parameters
+        action: delete
+      - key: specforge.artifact.content
+        action: delete
+      # Identifiers are kept, but hashed, so a trace can still be correlated
+      # with an audit record without naming the subject.
+      - key: specforge.principal.email
+        action: delete
+      - key: enduser.id
+        action: hash
+
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: local
+        action: upsert
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  debug:
+    verbosity: basic
+
+service:
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/redact, resource, batch]
+      exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [debug]

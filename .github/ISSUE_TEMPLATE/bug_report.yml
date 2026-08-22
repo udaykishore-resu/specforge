@@ -1,0 +1,88 @@
+name: Bug report
+description: Something behaves differently from how it is documented or intended.
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this is a security vulnerability, stop and read `SECURITY.md`
+        instead. Do not describe it here.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what occurred instead.
+      placeholder: |
+        Approving a specification as a second reviewer returned 403 with
+        authz.four_eyes_violated, but that reviewer has not authored any
+        version of the artifact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How to reproduce
+      description: >-
+        The smallest sequence that shows it. If it reproduces against `make dev`
+        and the seeded data, say so — that makes it enormously faster to fix.
+      value: |
+        1. `make dev`
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Artifact graph and traceability
+        - Approval and governance
+        - Audit trail and evidence
+        - Authentication and authorization
+        - Tenancy and isolation
+        - API
+        - Console
+        - Deployment, Helm or Terraform
+        - CLI or tooling
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `specforge-api --version`, or the image tag.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs, problem document or trace id
+      description: >-
+        Every error response carries a `code` and a `trace_id`. Those two
+        identify the exact request in the logs — please include them if you
+        have them. Redact tenant data.
+      render: text
+
+  - type: checkboxes
+    id: integrity
+    attributes:
+      label: Integrity
+      options:
+        - label: >-
+            This involves the audit chain failing to verify, or an artifact
+            whose content hash does not match its stored content.
+          required: false
+  - type: markdown
+    attributes:
+      value: >-
+        If you ticked the integrity box, please also preserve the database and
+        object store before doing anything else, and say in the report that you
+        have. A chain that stops verifying is a suspected tampering incident
+        until shown otherwise, and remediating it destroys the evidence.

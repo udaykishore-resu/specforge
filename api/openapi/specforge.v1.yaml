@@ -1,0 +1,1813 @@
+openapi: 3.1.0
+
+# SpecForge Platform API, version 1.
+#
+# This document is the contract, not a description of the implementation. Two
+# properties of the API are worth understanding before reading the paths:
+#
+#   1. Every governed read returns `content_hash`. A client can recompute the
+#      SHA-256 of the RFC 8785 canonicalization of `content` and compare. The
+#      API is not asking to be trusted.
+#   2. Every state-changing route requires a permission, and the server refuses
+#      to start if a route is registered without one (see `internal/server`
+#      LintRoutes). The permission each route requires is published live at
+#      GET /api/v1/openapi.json.
+#
+# Errors are RFC 9457 problem+json documents on every non-2xx response.
+
+info:
+  title: SpecForge Platform API
+  version: "1.0.0"
+  summary: Governed, traceable spec-driven software engineering platform.
+  description: |
+    SpecForge maintains a bidirectionally traceable graph running from business
+    intent through PRDs, specifications, process models, architecture, APIs,
+    code, tests and deployments.
+
+    **Authoritative source of truth.** Approved artifacts and the governance
+    engine are authoritative. AI proposes; deterministic validation, policy and
+    human approval decide. No endpoint accepts model output as fact.
+
+    **Immutability.** A version that reaches APPROVED, FROZEN, SUPERSEDED or
+    ABANDONED is byte-sealed: the database refuses updates to it and there is
+    no API path that mutates it. Changes are made by creating a new version.
+
+    **Tenancy.** Every data path is scoped by tenant, enforced in PostgreSQL
+    with row-level security rather than by application filtering alone.
+  contact:
+    name: SpecForge Platform Team
+  license:
+    name: Proprietary
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+  - url: https://api.specforge.example.com
+    description: Production (per-deployment hostname)
+
+tags:
+  - name: System
+    description: Liveness, readiness, metrics and discovery. No authentication.
+  - name: Session
+    description: The caller's identity and effective permissions.
+  - name: Tenants
+    description: Tenant lifecycle and settings.
+  - name: Identity
+    description: Principals and role assignments.
+  - name: Projects
+    description: Projects within a tenant.
+  - name: Artifacts
+    description: The canonical artifact model and its governed lifecycle.
+  - name: Traceability
+    description: Trace links and graph queries.
+  - name: Audit
+    description: The tamper-evident audit trail.
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ---------------------------------------------------------------- System ---
+  /healthz:
+    get:
+      tags: [System]
+      operationId: getHealth
+      summary: Liveness probe
+      description: Returns 200 while the process is running. It deliberately
+        makes no dependency calls, so a database outage does not cause
+        Kubernetes to restart otherwise-healthy pods.
+      security: []
+      responses:
+        "200":
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, const: ok }
+
+  /readyz:
+    get:
+      tags: [System]
+      operationId: getReadiness
+      summary: Readiness probe
+      description: Checks the dependencies required to serve traffic. Returns
+        503 when any of them is unavailable, which removes the pod from the
+        load balancer without restarting it.
+      security: []
+      responses:
+        "200":
+          description: Ready to serve traffic.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+        "503":
+          description: A dependency is unavailable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+
+  /metrics:
+    get:
+      tags: [System]
+      operationId: getMetrics
+      summary: Prometheus metrics
+      description: Prometheus text exposition format. In production this
+        listener is bound to a separate port that is not exposed publicly.
+      security: []
+      responses:
+        "200":
+          description: Metrics in Prometheus text format.
+          content:
+            text/plain:
+              schema: { type: string }
+
+  /api/v1/version:
+    get:
+      tags: [System]
+      operationId: getVersion
+      summary: Build information
+      security: []
+      responses:
+        "200":
+          description: Build and runtime information.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service: { type: string }
+                  version: { type: string }
+                  env: { type: string }
+                  go: { type: string }
+
+  /api/v1/openapi.json:
+    get:
+      tags: [System]
+      operationId: getRouteTable
+      summary: Live route table with required permissions
+      description: Returns every registered route and the permission it
+        requires. This is generated from the running router, so it cannot drift
+        from what the server actually enforces.
+      security: []
+      responses:
+        "200":
+          description: The live route table.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  service: { type: string }
+                  version: { type: string }
+                  routes:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        method: { type: string }
+                        path: { type: string }
+                        permission: { type: string }
+                        auth: { type: string, const: public }
+
+  # --------------------------------------------------------------- Session ---
+  /api/v1/auth/me:
+    get:
+      tags: [Session]
+      operationId: getCurrentPrincipal
+      summary: The caller's identity and effective permissions
+      description: The permission list is the server's own evaluation of the
+        caller's grants. Clients should drive their UI from it rather than
+        re-deriving permissions from role names.
+      responses:
+        "200":
+          description: The authenticated principal.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Principal" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # --------------------------------------------------------------- Tenants ---
+  /api/v1/tenants:
+    post:
+      tags: [Tenants]
+      operationId: createTenant
+      summary: Create a tenant
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateTenantRequest" }
+      responses:
+        "201":
+          description: The tenant was created in PROVISIONING.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    get:
+      tags: [Tenants]
+      operationId: listTenants
+      summary: List tenants visible to the caller
+      responses:
+        "200":
+          description: Tenants the caller may see.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Tenant" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/tenants/{tenantID}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [Tenants]
+      operationId: getTenant
+      summary: Read a tenant
+      responses:
+        "200":
+          description: The tenant.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/tenants/{tenantID}/settings:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    put:
+      tags: [Tenants]
+      operationId: updateTenantSettings
+      summary: Replace tenant settings
+      description: |
+        Settings that weaken a control (disabling four-eyes approval, extending
+        the step-up window, permitting `fail_open` guardrails) are recorded in
+        the audit trail with WARNING severity, because a governance platform
+        whose governance can be turned off quietly is not one.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TenantSettings" }
+      responses:
+        "200":
+          description: The updated tenant.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/tenants/{tenantID}/suspend:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    post:
+      tags: [Tenants]
+      operationId: suspendTenant
+      summary: Suspend a tenant
+      description: Suspension blocks writes and non-audit reads. It never
+        deletes data, and the audit trail remains readable and verifiable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  minLength: 1
+                  description: Recorded in the audit trail.
+      responses:
+        "200":
+          description: The tenant is suspended.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/tenants/{tenantID}/reinstate:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    post:
+      tags: [Tenants]
+      operationId: reinstateTenant
+      summary: Reinstate a suspended tenant
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason: { type: string, minLength: 1 }
+      responses:
+        "200":
+          description: The tenant is active again.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Tenant" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # -------------------------------------------------------------- Identity ---
+  /api/v1/tenants/{tenantID}/principals:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [Identity]
+      operationId: listPrincipals
+      summary: List principals in a tenant
+      responses:
+        "200":
+          description: Principals and their grants.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/PrincipalSummary" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/tenants/{tenantID}/principals/{principalID}/roles:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - name: principalID
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Identity]
+      operationId: assignRole
+      summary: Grant a role to a principal
+      description: |
+        Separation of duties applies here. A principal may not grant a role to
+        themselves (SoD-2), and API keys may never hold approval permissions
+        (SoD-6) — the latter is enforced by a database CHECK constraint as well
+        as by the application, because an authorization rule that lives in only
+        one place is one deployment away from being bypassed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  $ref: "#/components/schemas/Role"
+                project_id:
+                  type: string
+                  format: uuid
+                  description: Scopes the grant to one project. Omit for a
+                    tenant-wide grant.
+                expires_at:
+                  type: string
+                  format: date-time
+                  description: Time-boxes the grant. Expired grants are removed
+                    by the worker, not merely ignored at evaluation time.
+      responses:
+        "201":
+          description: The grant was created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RoleAssignment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403":
+          description: |
+            Refused. Common causes: the caller lacks role:assign; the caller is
+            granting to themselves (SoD-2); or the target is a service account
+            and the role carries approval permissions (SoD-6).
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  # -------------------------------------------------------------- Projects ---
+  /api/v1/tenants/{tenantID}/projects:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    post:
+      tags: [Projects]
+      operationId: createProject
+      summary: Create a project
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [key, name]
+              properties:
+                key:
+                  type: string
+                  pattern: "^[A-Z][A-Z0-9]{1,9}$"
+                  description: Short uppercase key used as the artifact id
+                    prefix, e.g. PAY in SPEC-PAY-001.
+                name: { type: string, minLength: 1 }
+                description: { type: string }
+      responses:
+        "201":
+          description: The project was created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+    get:
+      tags: [Projects]
+      operationId: listProjects
+      summary: List projects
+      responses:
+        "200":
+          description: Projects in the tenant.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Project" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/tenants/{tenantID}/projects/{projectID}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Projects]
+      operationId: getProject
+      summary: Read a project
+      responses:
+        "200":
+          description: The project.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/tenants/{tenantID}/projects/{projectID}/archive:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+    post:
+      tags: [Projects]
+      operationId: archiveProject
+      summary: Archive a project
+      description: Archiving makes the project read-only. Approved artifacts,
+        evidence and audit records are retained and remain verifiable.
+      responses:
+        "200":
+          description: The project is archived.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Project" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ------------------------------------------------------------- Artifacts ---
+  /api/v1/tenants/{tenantID}/projects/{projectID}/artifacts:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+    post:
+      tags: [Artifacts]
+      operationId: createArtifact
+      summary: Create an artifact and its first draft version
+      description: |
+        The artifact id is allocated from the type prefix, the project key and
+        the optional area (`SPEC` + `PAY` → `SPEC-PAY-001`) unless supplied.
+
+        When the content originates from a model, `generator` must record the
+        prompt version, model, provider and guardrail chain version. A version
+        whose generator claims LLM origin without that provenance is refused:
+        an unreproducible generation cannot be governed.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateArtifactRequest" }
+      responses:
+        "201":
+          description: The artifact and its DRAFT version 1.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArtifactVersion" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/UnprocessableContent" }
+    get:
+      tags: [Artifacts]
+      operationId: listArtifacts
+      summary: List artifacts
+      parameters:
+        - name: type
+          in: query
+          schema: { $ref: "#/components/schemas/ArtifactType" }
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/ArtifactStatus" }
+        - name: label
+          in: query
+          schema: { type: string }
+          description: "Filter on a label, as key:value."
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of artifacts.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Artifact" }
+                  next_cursor: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/tenants/{tenantID}/projects/{projectID}/artifacts/{artifactID}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ArtifactID"
+    get:
+      tags: [Artifacts]
+      operationId: getArtifact
+      summary: Read an artifact with its version history
+      responses:
+        "200":
+          description: The artifact and its versions.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  artifact: { $ref: "#/components/schemas/Artifact" }
+                  versions:
+                    type: array
+                    items: { $ref: "#/components/schemas/ArtifactVersion" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/tenants/{tenantID}/projects/{projectID}/artifacts/{artifactID}/versions/{version}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ArtifactID"
+      - $ref: "#/components/parameters/Version"
+    get:
+      tags: [Artifacts]
+      operationId: getArtifactVersion
+      summary: Read one version
+      description: |
+        The content hash is verified against the stored content before the
+        response is written. A mismatch fails the request with 500 rather than
+        returning content whose integrity is in doubt.
+      responses:
+        "200":
+          description: The version.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArtifactVersion" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500":
+          description: The stored content does not match its recorded hash.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+    put:
+      tags: [Artifacts]
+      operationId: updateDraft
+      summary: Update a draft version
+      description: |
+        Only DRAFT and CHANGES_REQUESTED versions accept updates. Any other
+        status returns 409 — a sealed version is not editable through any code
+        path, and the database enforces that independently.
+
+        Supply `If-Match` (or `version_no`) for optimistic concurrency; a stale
+        token returns 409 rather than silently overwriting a concurrent edit.
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: object }
+                version_no:
+                  type: integer
+                  format: int64
+                  description: Optimistic concurrency token, if not sent as If-Match.
+      responses:
+        "200":
+          description: The updated draft.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArtifactVersion" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: The version is sealed, or the concurrency token is stale.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "422": { $ref: "#/components/responses/UnprocessableContent" }
+
+  /api/v1/tenants/{tenantID}/projects/{projectID}/artifacts/{artifactID}/versions/{version}/submit:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ArtifactID"
+      - $ref: "#/components/parameters/Version"
+    post:
+      tags: [Artifacts]
+      operationId: submitForReview
+      summary: Submit a draft for review
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommentBody" }
+      responses:
+        "200":
+          description: The version moved to USER_REVIEW.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArtifactVersion" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/tenants/{tenantID}/projects/{projectID}/artifacts/{artifactID}/versions/{version}/request-changes:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ArtifactID"
+      - $ref: "#/components/parameters/Version"
+    post:
+      tags: [Artifacts]
+      operationId: requestChanges
+      summary: Return a version to the author
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommentBody" }
+      responses:
+        "200":
+          description: The version moved to CHANGES_REQUESTED.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArtifactVersion" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/tenants/{tenantID}/projects/{projectID}/artifacts/{artifactID}/versions/{version}/approve:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ArtifactID"
+      - $ref: "#/components/parameters/Version"
+    post:
+      tags: [Artifacts]
+      operationId: approveVersion
+      summary: Approve a version and seal it
+      description: |
+        Approval is the platform's most consequential operation, and it is
+        ordered deliberately:
+
+        1. Governance gates are evaluated. A blocking gate stops the request
+           before any evidence is written.
+        2. Authorization is checked, including four-eyes (an approver may not
+           have authored any version of the artifact) and step-up
+           authentication freshness.
+        3. Canonical content and the approval evidence document are written to
+           write-once storage.
+        4. In a single transaction: the previously approved version is
+           superseded, this version is sealed, the artifact head is updated,
+           the project graph version is bumped, an audit record is chained, and
+           the domain event is written to the outbox.
+
+        Evidence is written before the row is sealed, so a crash leaves an
+        orphaned, content-addressed evidence object — harmless — rather than an
+        approval with no evidence behind it.
+
+        The approval comment is mandatory: it is the reviewer's statement of
+        what they verified, and it is part of the evidence document.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [comment]
+              properties:
+                comment:
+                  type: string
+                  minLength: 1
+                  description: What the approver verified. Required.
+      responses:
+        "200":
+          description: The version is APPROVED and sealed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArtifactVersion" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401":
+          description: |
+            Step-up authentication is required or has expired. The problem
+            document carries `code: authz.step_up_required` and the client
+            should re-authenticate with a second factor and retry.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "403":
+          description: |
+            Refused. Common causes: `authz.four_eyes_violated` (the approver
+            authored a version of this artifact); the caller lacks
+            artifact:approve; or the caller is a service account, which may
+            never approve.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "409":
+          description: The version is not in review, or was approved concurrently.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "422":
+          description: A governance gate blocked the approval. The problem
+            document lists the blocking gate decisions.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /api/v1/tenants/{tenantID}/projects/{projectID}/artifacts/{artifactID}/versions/{version}/freeze:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ArtifactID"
+      - $ref: "#/components/parameters/Version"
+    post:
+      tags: [Artifacts]
+      operationId: freezeVersion
+      summary: Freeze an approved version
+      description: Freezing marks a version as a release baseline. It cannot be
+        superseded by a later approval without an explicit change proposal.
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommentBody" }
+      responses:
+        "200":
+          description: The version is FROZEN.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArtifactVersion" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/tenants/{tenantID}/projects/{projectID}/artifacts/{artifactID}/revise:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ArtifactID"
+    post:
+      tags: [Artifacts]
+      operationId: reviseArtifact
+      summary: Open a new draft version from the approved one
+      description: |
+        This is the only way to change an approved artifact. The approved
+        version is never modified; a new DRAFT is created from its content,
+        carrying `previous_version`. The prior version is superseded only when
+        the new one is approved, so the approved baseline stays intact and
+        readable throughout the revision.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [change_summary]
+              properties:
+                change_summary:
+                  type: string
+                  minLength: 1
+                  description: Why the artifact is being revised.
+      responses:
+        "201":
+          description: A new DRAFT version.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ArtifactVersion" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: A draft revision is already open.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  /api/v1/tenants/{tenantID}/projects/{projectID}/artifacts/{artifactID}/versions/{version}/evidence:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ArtifactID"
+      - $ref: "#/components/parameters/Version"
+    get:
+      tags: [Artifacts]
+      operationId: getApprovalEvidence
+      summary: Fetch the approval evidence document
+      description: |
+        Returns the exact bytes written to write-once storage at approval,
+        along with their digest. Verify offline with:
+
+            specforge-cli verify-evidence --file evidence.json --digest sha256:...
+
+        The CLI recomputes the hash from the bytes and never contacts the
+        platform, which is what makes the evidence defensible to an auditor who
+        does not trust SpecForge.
+      responses:
+        "200":
+          description: The evidence document.
+          content:
+            application/vnd.specforge.approval+json:
+              schema: { $ref: "#/components/schemas/ApprovalEvidenceDocument" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: The version has no evidence because it is not approved.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+
+  # ---------------------------------------------------------- Traceability ---
+  /api/v1/tenants/{tenantID}/projects/{projectID}/links:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+    post:
+      tags: [Traceability]
+      operationId: createTraceLink
+      summary: Create a trace link
+      description: |
+        Links created with `origin: LLM_PROPOSED` are created in PROPOSED and
+        cannot reach ACCEPTED without a recorded human disposition. That rule
+        is enforced by a database CHECK constraint as well as by the domain, so
+        a model cannot quietly write itself into the traceability graph.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateLinkRequest" }
+      responses:
+        "201":
+          description: The link was created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TraceLink" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422":
+          description: An endpoint does not exist, or the link type is not
+            permitted between these artifact types.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+    get:
+      tags: [Traceability]
+      operationId: listTraceLinks
+      summary: List trace links
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string }
+        - name: to
+          in: query
+          schema: { type: string }
+        - name: link_type
+          in: query
+          schema: { $ref: "#/components/schemas/LinkType" }
+        - name: status
+          in: query
+          schema: { $ref: "#/components/schemas/LinkStatus" }
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Matching links.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/TraceLink" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/tenants/{tenantID}/projects/{projectID}/links/{linkID}/accept:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/LinkID"
+    post:
+      tags: [Traceability]
+      operationId: acceptTraceLink
+      summary: Accept a proposed link
+      description: For an LLM-proposed link this records the human disposition
+        that the database requires before the link may become ACCEPTED.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommentBody" }
+      responses:
+        "200":
+          description: The link is ACCEPTED.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TraceLink" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/tenants/{tenantID}/projects/{projectID}/links/{linkID}/reject:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/LinkID"
+    post:
+      tags: [Traceability]
+      operationId: rejectTraceLink
+      summary: Reject a proposed link
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CommentBody" }
+      responses:
+        "200":
+          description: The link is REJECTED.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TraceLink" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/tenants/{tenantID}/projects/{projectID}/trace/upstream:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/TraceArtifact"
+      - $ref: "#/components/parameters/TraceVersion"
+      - $ref: "#/components/parameters/TraceTypes"
+    get:
+      tags: [Traceability]
+      operationId: traceUpstream
+      summary: "Answer: why does this exist?"
+      description: Walks the graph towards intent — code to specification to
+        requirement to PRD — returning every path found.
+      responses:
+        "200":
+          description: Upstream paths.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Paths" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/tenants/{tenantID}/projects/{projectID}/trace/downstream:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/TraceArtifact"
+      - $ref: "#/components/parameters/TraceVersion"
+      - $ref: "#/components/parameters/TraceTypes"
+    get:
+      tags: [Traceability]
+      operationId: traceDownstream
+      summary: "Answer: what implements this?"
+      responses:
+        "200":
+          description: Downstream paths.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Paths" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/tenants/{tenantID}/projects/{projectID}/trace/impact:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/TraceArtifact"
+      - $ref: "#/components/parameters/TraceVersion"
+    get:
+      tags: [Traceability]
+      operationId: traceImpact
+      summary: "Answer: what breaks if this changes?"
+      description: |
+        The impact set is computed deterministically from accepted trace links.
+        It is not a model's opinion: a change-impact answer that cannot be
+        reproduced from the graph is not usable for release governance.
+      responses:
+        "200":
+          description: The impact set.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ImpactSet" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ------------------------------------------------------------------ Audit ---
+  /api/v1/tenants/{tenantID}/audit:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    get:
+      tags: [Audit]
+      operationId: listAuditRecords
+      summary: Query the audit trail
+      parameters:
+        - name: action
+          in: query
+          schema: { type: string }
+        - name: actor
+          in: query
+          schema: { type: string }
+        - name: severity
+          in: query
+          schema: { type: string, enum: [INFO, NOTICE, WARNING, CRITICAL] }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: A page of audit records, each carrying its chain hashes.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AuditRecord" }
+                  next_cursor: { type: string }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/tenants/{tenantID}/audit/{sequence}:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+      - name: sequence
+        in: path
+        required: true
+        schema: { type: integer, format: int64, minimum: 1 }
+    get:
+      tags: [Audit]
+      operationId: getAuditRecord
+      summary: Read one audit record
+      responses:
+        "200":
+          description: The record.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditRecord" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/tenants/{tenantID}/audit/verify:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    post:
+      tags: [Audit]
+      operationId: verifyAuditChain
+      summary: Verify the audit hash chain
+      description: |
+        Recomputes each record's hash, checks that every record links to its
+        predecessor, and checks that the sequence has no gaps. All three
+        matter: verifying only hashes would miss the wholesale deletion of a
+        contiguous block.
+
+        A full-range verification is additionally compared against the last
+        published anchor, and the report says which anchor it used. Internal
+        consistency alone proves little — an attacker with write access could
+        rewrite every record and recompute every hash. The anchor is the
+        external reference that such a rewrite cannot reach.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                from: { type: integer, format: int64, default: 1 }
+                to:
+                  type: integer
+                  format: int64
+                  default: 0
+                  description: 0 verifies to the end of the chain.
+      responses:
+        "200":
+          description: The verification report. Check `valid`; a 200 response
+            does not imply the chain is intact.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VerifyReport" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/tenants/{tenantID}/audit/anchor:
+    parameters:
+      - $ref: "#/components/parameters/TenantID"
+    post:
+      tags: [Audit]
+      operationId: anchorAuditChain
+      summary: Publish a chain anchor
+      description: Writes the current chain head to write-once storage. The
+        worker does this hourly; this endpoint exists for on-demand anchoring
+        before an export or an audit.
+      responses:
+        "201":
+          description: The anchor was published.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditAnchor" }
+        "204":
+          description: No new records since the last anchor.
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        An OIDC access token. Only asymmetric signature algorithms are
+        accepted — `none` and the HMAC family are rejected outright, which
+        closes the algorithm-confusion class of attack. Signing keys are
+        fetched from the issuer's JWKS and cached.
+
+        Service accounts authenticate the same way and are clamped: they can
+        never hold approval permissions, whatever their token claims.
+
+  parameters:
+    TenantID:
+      name: tenantID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ProjectID:
+      name: projectID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ArtifactID:
+      name: artifactID
+      in: path
+      required: true
+      schema: { type: string, example: SPEC-PAY-001 }
+    Version:
+      name: version
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+    LinkID:
+      name: linkID
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+      description: Opaque cursor from a previous page.
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    TraceArtifact:
+      name: artifact
+      in: query
+      required: true
+      schema: { type: string }
+    TraceVersion:
+      name: version
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    TraceTypes:
+      name: types
+      in: query
+      schema: { type: string }
+      description: Comma-separated artifact types to restrict the walk to.
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      schema: { type: string, maxLength: 255 }
+      description: |
+        Replays return the original response. Reusing a key with a different
+        request body is a 409: silently treating it as a replay would let a
+        client believe a write happened that never did.
+    IfMatch:
+      name: If-Match
+      in: header
+      schema: { type: string }
+      description: Optimistic concurrency token from a previous read.
+
+  responses:
+    BadRequest:
+      description: The request is malformed or fails validation.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Unauthorized:
+      description: Authentication is missing, invalid, or step-up is required.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Forbidden:
+      description: The caller is authenticated but not permitted.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound:
+      description: No such resource, or it is outside the caller's tenant.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Conflict:
+      description: The resource is in a state that does not permit this action.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    UnprocessableContent:
+      description: Schema validation or a governance gate rejected the request.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+  schemas:
+    Problem:
+      type: object
+      description: RFC 9457 problem detail. `code` is the stable machine-readable
+        identifier; `title` and `detail` are for humans and may be reworded.
+      required: [type, title, status, code]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        code:
+          type: string
+          example: authz.four_eyes_violated
+        trace_id: { type: string }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field: { type: string }
+              code: { type: string }
+              message: { type: string }
+
+    Readiness:
+      type: object
+      properties:
+        status: { type: string, enum: [ready, degraded] }
+        checks:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              ok: { type: boolean }
+              detail: { type: string }
+              latency_ms: { type: number }
+
+    Role:
+      type: string
+      enum:
+        - platform_admin
+        - tenant_admin
+        - product_owner
+        - business_analyst
+        - architect
+        - developer
+        - qa
+        - devops
+        - security
+        - compliance
+        - auditor
+        - viewer
+
+    Principal:
+      type: object
+      properties:
+        principal_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        kind: { type: string, enum: [USER, SERVICE] }
+        display: { type: string }
+        roles:
+          type: array
+          items:
+            type: object
+            properties:
+              role: { $ref: "#/components/schemas/Role" }
+              project_id: { type: string }
+        permissions:
+          type: array
+          items: { type: string }
+          description: The server's evaluation of what this caller may do.
+        auth_time: { type: string, format: date-time }
+        amr:
+          type: array
+          items: { type: string }
+          description: Authentication methods. Approval requires a recent
+            second factor to appear here.
+
+    PrincipalSummary:
+      type: object
+      properties:
+        principal_id: { type: string, format: uuid }
+        kind: { type: string, enum: [USER, SERVICE] }
+        display: { type: string }
+        status: { type: string }
+        roles:
+          type: array
+          items: { $ref: "#/components/schemas/RoleAssignment" }
+
+    RoleAssignment:
+      type: object
+      properties:
+        assignment_id: { type: string, format: uuid }
+        principal_id: { type: string, format: uuid }
+        role: { $ref: "#/components/schemas/Role" }
+        project_id: { type: string, format: uuid }
+        granted_by: { type: string, format: uuid }
+        granted_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+
+    CreateTenantRequest:
+      type: object
+      required: [slug, name]
+      properties:
+        slug:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{1,62}$"
+        name: { type: string, minLength: 1 }
+        isolation_mode:
+          type: string
+          enum: [shared, dedicated_schema, single_tenant]
+          default: shared
+        region: { type: string }
+
+    TenantSettings:
+      type: object
+      description: Tenant policy. The defaults are the secure ones; every field
+        that weakens a control is audited when changed.
+      properties:
+        four_eyes_required: { type: boolean, default: true }
+        step_up_max_age_seconds: { type: integer, default: 900 }
+        require_prd_before_spec: { type: boolean, default: true }
+        allow_llm_link_auto_accept:
+          type: boolean
+          default: false
+          description: Kept for policy visibility. The database refuses an
+            accepted LLM-proposed link without a disposition regardless of
+            this setting.
+        max_exception_days: { type: integer, default: 30 }
+        retention_days: { type: integer, default: 2555 }
+
+    Tenant:
+      type: object
+      properties:
+        tenant_id: { type: string, format: uuid }
+        slug: { type: string }
+        name: { type: string }
+        status:
+          type: string
+          enum: [PROVISIONING, ACTIVE, SUSPENDED, DEPROVISIONING, PURGED, FAILED]
+        isolation_mode: { type: string }
+        region: { type: string }
+        settings: { $ref: "#/components/schemas/TenantSettings" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        version_no: { type: integer, format: int64 }
+
+    Project:
+      type: object
+      properties:
+        project_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        key: { type: string }
+        name: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [ACTIVE, ARCHIVED, PURGED] }
+        pdlc_phase:
+          type: string
+          enum: [DISCOVER, DEFINE, SPECIFY, MODEL, ARCHITECT, GENERATE, VALIDATE,
+                 GOVERN, BUILD, TEST, SECURE, DEPLOY, OBSERVE, REVIEW, EVOLVE, RETIRE]
+        graph_version:
+          type: integer
+          format: int64
+          description: Incremented on every change to the artifact graph. Use
+            it to detect staleness without diffing the graph.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        version_no: { type: integer, format: int64 }
+
+    ArtifactType:
+      type: string
+      enum:
+        - PRD
+        - REQUIREMENT
+        - SPECIFICATION
+        - BPMN_PROCESS
+        - ARCHITECTURE
+        - API_CONTRACT
+        - DATA_MODEL
+        - SEQUENCE
+        - STATE_MACHINE
+        - CODE_UNIT
+        - TEST_CASE
+        - PIPELINE_DEF
+        - DEPLOYMENT
+        - POLICY
+        - EVIDENCE
+        - PROMPT
+
+    ArtifactStatus:
+      type: string
+      enum:
+        - DRAFT
+        - AI_REVIEW
+        - USER_REVIEW
+        - CHANGES_REQUESTED
+        - APPROVED
+        - FROZEN
+        - SUPERSEDED
+        - ABANDONED
+
+    Generator:
+      type: object
+      description: Provenance. For LLM-generated content every field that makes
+        the generation reproducible is required.
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [USER, INFERENCE, ANALYZER, IMPORT]
+        prompt_version: { type: string }
+        model: { type: string }
+        provider: { type: string }
+        guardrail_chain_version: { type: string }
+        inference_id: { type: string }
+        analyzer: { type: string }
+        analyzer_version: { type: string }
+
+    ArtifactRef:
+      type: object
+      required: [artifact_id, version]
+      properties:
+        artifact_id: { type: string }
+        version: { type: integer, minimum: 1 }
+
+    CreateArtifactRequest:
+      type: object
+      required: [type, title, content]
+      properties:
+        artifact_id:
+          type: string
+          description: Optional. Allocated from the type and area when omitted.
+        area:
+          type: string
+          description: "Id segment, e.g. AUTH in SPEC-AUTH-001."
+        type: { $ref: "#/components/schemas/ArtifactType" }
+        title: { type: string, minLength: 1 }
+        content_schema:
+          type: string
+          description: Schema identifier the content is validated against.
+        content: { type: object }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+        source:
+          $ref: "#/components/schemas/ArtifactRef"
+        parent:
+          $ref: "#/components/schemas/ArtifactRef"
+        generator:
+          $ref: "#/components/schemas/Generator"
+
+    Artifact:
+      type: object
+      properties:
+        artifact_id: { type: string }
+        artifact_type: { $ref: "#/components/schemas/ArtifactType" }
+        title: { type: string }
+        current_version: { type: integer }
+        status: { $ref: "#/components/schemas/ArtifactStatus" }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+        created_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ArtifactVersion:
+      type: object
+      properties:
+        artifact_id: { type: string }
+        artifact_type: { $ref: "#/components/schemas/ArtifactType" }
+        version: { type: integer }
+        status: { $ref: "#/components/schemas/ArtifactStatus" }
+        content_schema: { type: string }
+        content: { type: object }
+        content_hash:
+          type: string
+          pattern: "^sha256:[0-9a-f]{64}$"
+          description: |
+            SHA-256 of the RFC 8785 canonicalization of the version envelope,
+            excluding `status`, the approval fields and trace links. Those are
+            excluded on purpose: the hash of an approved version is the hash of
+            exactly the bytes that were reviewed, and it does not change as the
+            version moves through its lifecycle.
+        content_ref: { type: string }
+        change_summary: { type: string }
+        generator: { $ref: "#/components/schemas/Generator" }
+        previous_version: { type: integer }
+        parent_artifact: { $ref: "#/components/schemas/ArtifactRef" }
+        source_artifact: { $ref: "#/components/schemas/ArtifactRef" }
+        approved_by: { type: string, format: uuid }
+        approved_at: { type: string, format: date-time }
+        approval_comment: { type: string }
+        approval_evidence: { $ref: "#/components/schemas/ApprovalEvidenceRef" }
+        sealed: { type: boolean }
+        sealed_at: { type: string, format: date-time }
+        created_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        version_no: { type: integer, format: int64 }
+
+    ApprovalEvidenceRef:
+      type: object
+      properties:
+        evidence_id: { type: string }
+        digest: { type: string, pattern: "^sha256:[0-9a-f]{64}$" }
+        media_type: { type: string }
+        storage_ref: { type: string }
+        gate_decisions:
+          type: array
+          items: { $ref: "#/components/schemas/GateDecision" }
+        approver_auth_time: { type: string, format: date-time }
+
+    ApprovalEvidenceDocument:
+      type: object
+      description: The write-once record of an approval. Its bytes are
+        canonicalized with RFC 8785 before hashing, so the digest is
+        reproducible in any language.
+      properties:
+        evidence_id: { type: string }
+        tenant_id: { type: string, format: uuid }
+        project_id: { type: string, format: uuid }
+        artifact_id: { type: string }
+        artifact_type: { $ref: "#/components/schemas/ArtifactType" }
+        version: { type: integer }
+        content_hash: { type: string }
+        content_ref: { type: string }
+        approver: { type: string, format: uuid }
+        approver_display: { type: string }
+        approver_auth_time: { type: string, format: date-time }
+        approver_amr:
+          type: array
+          items: { type: string }
+        approval_comment: { type: string }
+        approved_at:
+          type: string
+          format: date-time
+          description: The same instant recorded on the sealed row. Evidence
+            whose timestamp disagreed with the record it attests to would be
+            evidence an auditor could reject.
+        gate_decisions:
+          type: array
+          items: { $ref: "#/components/schemas/GateDecision" }
+        previous_version: { type: integer }
+        change_summary: { type: string }
+        generator: { $ref: "#/components/schemas/Generator" }
+
+    GateDecision:
+      type: object
+      properties:
+        gate: { type: string }
+        decision: { type: string, enum: [ALLOW, WARN, BLOCK] }
+        detail: { type: string }
+        policy_version: { type: string }
+
+    LinkType:
+      type: string
+      enum:
+        - DERIVED_FROM
+        - SATISFIES
+        - IMPLEMENTS
+        - REPRESENTED_BY
+        - VERIFIES
+        - REALIZED_BY
+        - DEPLOYS
+        - CONTAINS
+        - DEPENDS_ON
+        - SUPERSEDES
+        - GOVERNS
+        - EVIDENCES
+        - CONFLICTS_WITH
+
+    LinkStatus:
+      type: string
+      enum: [PROPOSED, ACCEPTED, REJECTED, STALE]
+
+    CreateLinkRequest:
+      type: object
+      required: [from, to, link_type]
+      properties:
+        from: { $ref: "#/components/schemas/ArtifactRef" }
+        to: { $ref: "#/components/schemas/ArtifactRef" }
+        link_type: { $ref: "#/components/schemas/LinkType" }
+        origin:
+          type: string
+          enum: [HUMAN, LLM_PROPOSED, ANALYZER]
+          default: HUMAN
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Required for non-human origins. Human links default to 1.
+        rationale: { type: string }
+
+    TraceLink:
+      type: object
+      properties:
+        link_id: { type: string, format: uuid }
+        from: { $ref: "#/components/schemas/ArtifactRef" }
+        to: { $ref: "#/components/schemas/ArtifactRef" }
+        link_type: { $ref: "#/components/schemas/LinkType" }
+        origin: { type: string }
+        confidence: { type: number }
+        status: { $ref: "#/components/schemas/LinkStatus" }
+        rationale: { type: string }
+        disposition_id:
+          type: string
+          description: The recorded human decision. Required before an
+            LLM-proposed link may be ACCEPTED.
+        created_by: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+
+    Hop:
+      type: object
+      description: One edge traversed. The origin and status travel with the hop
+        so a caller can see whether a path rests on a model-proposed claim.
+      properties:
+        from: { $ref: "#/components/schemas/ArtifactRef" }
+        to: { $ref: "#/components/schemas/ArtifactRef" }
+        link_type: { $ref: "#/components/schemas/LinkType" }
+        origin: { type: string, enum: [HUMAN, ANALYZER, LLM_PROPOSED] }
+        confidence: { type: number }
+        status: { $ref: "#/components/schemas/LinkStatus" }
+
+    TracePath:
+      type: object
+      description: A route from the traversal's origin to one reachable artifact.
+      properties:
+        target: { $ref: "#/components/schemas/ArtifactRef" }
+        artifact_type: { $ref: "#/components/schemas/ArtifactType" }
+        title: { type: string }
+        status: { type: string }
+        hops:
+          type: array
+          items: { $ref: "#/components/schemas/Hop" }
+        depth: { type: integer }
+
+    Paths:
+      type: object
+      properties:
+        start: { $ref: "#/components/schemas/ArtifactRef" }
+        direction: { type: string, enum: [upstream, downstream] }
+        paths:
+          type: array
+          items: { $ref: "#/components/schemas/TracePath" }
+        truncated:
+          type: boolean
+          description: True when the depth bound stopped the walk before the
+            graph was exhausted, so the answer is partial. A traversal that
+            silently stopped short would be misleading.
+
+    Impacted:
+      type: object
+      properties:
+        target: { $ref: "#/components/schemas/ArtifactRef" }
+        artifact_type: { $ref: "#/components/schemas/ArtifactType" }
+        status: { type: string }
+        distance: { type: integer }
+        severity: { type: string, enum: [INFO, LOW, MEDIUM, HIGH, CRITICAL] }
+        reason: { type: string }
+        path:
+          type: array
+          items: { $ref: "#/components/schemas/Hop" }
+
+    ImpactSet:
+      type: object
+      properties:
+        subject: { $ref: "#/components/schemas/ArtifactRef" }
+        impacted:
+          type: array
+          items: { $ref: "#/components/schemas/Impacted" }
+        truncated: { type: boolean }
+        blast_radius:
+          type: integer
+          description: How many impacted artifacts are HIGH or above — the
+            number a reviewer wants to see before anything else.
+
+    AuditRecord:
+      type: object
+      properties:
+        sequence:
+          type: integer
+          format: int64
+          description: Per-tenant, gapless. A gap is itself evidence of tampering.
+        id: { type: string }
+        project_id: { type: string, format: uuid }
+        action: { type: string, example: artifact.approve }
+        outcome: { type: string, enum: [SUCCESS, FAILURE, DENIED] }
+        severity: { type: string, enum: [INFO, NOTICE, WARNING, CRITICAL] }
+        actor: { type: object }
+        target: { type: object }
+        attributes: { type: object }
+        request_id: { type: string }
+        trace_id: { type: string }
+        occurred_at: { type: string, format: date-time }
+        prev_hash: { type: string }
+        record_hash:
+          type: string
+          description: SHA-256 over the canonicalized record including
+            `prev_hash`. Exposed so the chain can be verified offline.
+
+    VerifyReport:
+      type: object
+      properties:
+        tenant_id: { type: string, format: uuid }
+        from: { type: integer, format: int64 }
+        to: { type: integer, format: int64 }
+        records_checked: { type: integer, format: int64 }
+        valid: { type: boolean }
+        failed_at:
+          type: integer
+          format: int64
+          description: The first sequence whose hash or linkage is wrong.
+        reason: { type: string }
+        gap_at:
+          type: integer
+          format: int64
+          description: The first missing sequence number, if any.
+        anchored_at:
+          type: integer
+          format: int64
+          description: The anchor the chain was compared against. Absent means
+            the chain was checked only for internal consistency, which is a
+            strictly weaker claim.
+
+    AuditAnchor:
+      type: object
+      properties:
+        tenant_id: { type: string, format: uuid }
+        sequence: { type: integer, format: int64 }
+        head_hash: { type: string }
+        anchored_at: { type: string, format: date-time }
+        storage_ref: { type: string }
+
+    CommentBody:
+      type: object
+      properties:
+        comment: { type: string }

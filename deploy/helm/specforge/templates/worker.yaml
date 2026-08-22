@@ -1,0 +1,76 @@
+{{- if .Values.worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "specforge.fullname" . }}-worker
+  labels:
+    {{- include "specforge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  strategy:
+    # Recreate, not RollingUpdate. The outbox relay and the anchoring job are
+    # single-writer by design; briefly running two copies is safe but pointless,
+    # and a clean handover keeps the logs readable during an incident.
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "specforge.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "specforge.labels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+    spec:
+      serviceAccountName: {{ include "specforge.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Long enough to finish a batch and commit rather than abandoning it. The
+      # relay is at-least-once and consumers are idempotent, so an abandoned
+      # batch is recoverable — but a clean stop keeps the pending count honest.
+      terminationGracePeriodSeconds: 45
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: {{ include "specforge.image" (dict "root" . "component" "specforge-worker" "tag" .Values.worker.tag) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["--roles", {{ .Values.worker.roles | quote }}]
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+          env:
+            {{- include "specforge.commonEnv" . | nindent 12 }}
+            - name: SF_SERVICE_NAME
+              value: specforge-worker
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+          livenessProbe:
+            # The worker has no HTTP surface beyond metrics; a served scrape
+            # endpoint is sufficient evidence that the process is alive.
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

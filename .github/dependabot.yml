@@ -1,0 +1,54 @@
+# Dependency updates.
+#
+# The Go module has no third-party dependencies, so the ecosystems that matter
+# here are the toolchains around it: npm for the console, Actions for the
+# pipeline, and Docker for the base images. Those are the ones that go stale
+# quietly.
+
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies, console]
+    groups:
+      # One pull request for the framework, because next, react and their types
+      # move together and reviewing them apart wastes everyone's time.
+      next:
+        patterns: ["next", "react", "react-dom", "@types/react*", "eslint-config-next"]
+      types:
+        patterns: ["@types/*"]
+      tooling:
+        patterns: ["eslint*", "typescript", "tailwindcss", "@tailwindcss/*"]
+    commit-message:
+      prefix: "build(deps)"
+      prefix-development: "build(deps-dev)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies, ci]
+    commit-message:
+      prefix: "ci(deps)"
+
+  - package-ecosystem: docker
+    directories:
+      - /deploy/docker
+    schedule:
+      interval: weekly
+    labels: [dependencies, security]
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies]
+    commit-message:
+      prefix: "build(deps)"

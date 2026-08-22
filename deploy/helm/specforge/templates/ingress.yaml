@@ -1,0 +1,44 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "specforge.fullname" . }}
+  labels:
+    {{- include "specforge.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.apiHost }}
+        - {{ .Values.ingress.webHost }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.apiHost }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "specforge.fullname" . }}-api
+                port:
+                  number: {{ .Values.api.service.port }}
+    {{- if .Values.web.enabled }}
+    - host: {{ .Values.ingress.webHost }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "specforge.fullname" . }}-web
+                port:
+                  number: {{ .Values.web.service.port }}
+    {{- end }}
+{{- end }}

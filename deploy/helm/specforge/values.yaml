@@ -1,0 +1,235 @@
+# SpecForge default values.
+#
+# The defaults here are the ones that are safe to run in production. Where a
+# setting weakens a control, the default is the strict option and turning it off
+# requires saying so explicitly — a governance platform whose governance is off
+# by accident is worse than one that fails to start.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  registry: ghcr.io
+  repository: specforge
+  # Tags are set per component below. There is no `latest` default: a
+  # deployment that cannot name the exact image it is running cannot be
+  # correlated with an audit record or a provenance attestation.
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+environment: production
+
+# ---------------------------------------------------------------------- API --
+api:
+  enabled: true
+  tag: "1.0.0"
+  replicaCount: 3
+
+  service:
+    type: ClusterIP
+    port: 8080
+    metricsPort: 9090
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      # No CPU limit: throttling the API during an approval storm makes the
+      # object-store write in the approval path time out, which turns a busy
+      # period into failed approvals. Memory is limited because a leak must not
+      # take the node with it.
+      memory: 1Gi
+
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+
+  # Probe paths are fixed by the application. /healthz never touches a
+  # dependency, so a database outage does not cause a restart loop on top of it.
+  livenessProbe:
+    path: /healthz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readinessProbe:
+    path: /readyz
+    initialDelaySeconds: 3
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 2
+
+  # Long enough for an in-flight approval to finish writing evidence and commit.
+  terminationGracePeriodSeconds: 40
+
+# ------------------------------------------------------------------- Worker --
+worker:
+  enabled: true
+  tag: "1.0.0"
+  # The outbox relay takes a row-level lock per batch, so extra replicas add
+  # contention rather than throughput. Scale by splitting roles instead.
+  replicaCount: 1
+  roles: "outbox,anchor,gc"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+# ---------------------------------------------------------------- Console ----
+web:
+  enabled: true
+  tag: "1.0.0"
+  replicaCount: 2
+  service:
+    type: ClusterIP
+    port: 3000
+  # The externally reachable origin. It is not derivable from inside the pod,
+  # and post-authentication redirects are built from it.
+  publicUrl: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 768Mi
+
+# --------------------------------------------------------------- Ingress -----
+ingress:
+  enabled: false
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 2m
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  apiHost: api.specforge.example.com
+  webHost: app.specforge.example.com
+  tls:
+    enabled: true
+    secretName: specforge-tls
+
+# --------------------------------------------------------------- Database ----
+database:
+  # The DSN lives in a Secret that already exists in the namespace. The chart
+  # never takes a password as a value: values files end up in Git.
+  existingSecret: specforge-database
+  dsnKey: dsn
+  maxOpenConns: 25
+  statementTimeout: 15s
+  # Migrations run as a pre-upgrade Job so that a rollout cannot start serving
+  # against a schema it was not built for.
+  runMigrations: true
+
+cache:
+  provider: redis
+  addr: ""
+  existingSecret: ""
+  passwordKey: password
+  tls: true
+
+# ---------------------------------------------------------- Object storage ---
+objstore:
+  provider: s3
+  region: ""
+  endpoint: ""
+  contentBucket: ""
+  evidenceBucket: ""
+  # Object lock is what makes approval evidence and audit anchors defensible.
+  # Disabling it turns write-once storage into ordinary storage, so it defaults
+  # on and the chart refuses to render without buckets when it is set.
+  objectLock: true
+  existingSecret: ""
+  accessKeyKey: access-key
+  secretKeyKey: secret-key
+  # Preferred over static keys where the cluster supports it.
+  serviceAccountAnnotations: {}
+
+events:
+  provider: kafka
+  brokers: []
+  topicPrefix: specforge
+  existingSecret: ""
+
+# ------------------------------------------------------------------ Auth -----
+auth:
+  issuer: ""
+  audience: ""
+  jwksUrl: ""
+  tenantClaim: "https://specforge.io/tenant"
+  rolesClaim: "https://specforge.io/roles"
+  clientId: ""
+  existingSecret: ""
+  clientSecretKey: client-secret
+  sessionSecretKey: session-secret
+  stepUpMaxAge: 15m
+  # The development identity provider must never run outside development. Both
+  # the chart and the application refuse it in production.
+  devIdP: false
+
+# ------------------------------------------------------------ Governance -----
+governance:
+  fourEyes: true
+  maxExceptionDays: 90
+
+# --------------------------------------------------------- Observability -----
+observability:
+  logLevel: info
+  logFormat: json
+  otlpEndpoint: ""
+  sampleRatio: 0.1
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+  prometheusRule:
+    enabled: false
+    labels: {}
+
+# -------------------------------------------------------------- Security -----
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  capabilities:
+    drop: ["ALL"]
+
+networkPolicy:
+  # Default-deny with explicit egress. A governance platform that can open
+  # arbitrary outbound connections is one exploited dependency away from
+  # exfiltrating an entire tenant's specifications.
+  enabled: true
+  allowedEgressCIDRs: []
+  dnsPort: 53
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  create: true
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+priorityClassName: ""
+
+extraEnv: []
+extraLabels: {}
+extraAnnotations: {}

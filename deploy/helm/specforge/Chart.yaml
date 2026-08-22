@@ -1,0 +1,26 @@
+apiVersion: v2
+name: specforge
+description: |
+  SpecForge — a governed, traceable spec-driven software engineering platform.
+
+  The chart deploys the API, the asynchronous worker and the console. It does
+  not deploy PostgreSQL, Redis, Kafka or object storage: those are stateful
+  systems whose backup, retention and failover characteristics are what the
+  platform's guarantees rest on, and running them as chart sub-releases makes
+  it too easy to lose an audit trail to a `helm uninstall`. Connection details
+  are supplied through existing Secrets.
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - governance
+  - traceability
+  - specifications
+  - audit
+home: https://github.com/specforge/specforge
+sources:
+  - https://github.com/specforge/specforge
+maintainers:
+  - name: SpecForge Platform Team
+annotations:
+  category: DeveloperTools

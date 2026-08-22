@@ -1,0 +1,44 @@
+name: Feature request
+description: Something the platform should do and does not.
+labels: [enhancement, triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >-
+        What are you trying to accomplish, and what stops you today? Describe
+        the situation rather than the solution — the right change is often not
+        the one either of us thought of first.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: Optional. If you have a specific design, describe it.
+
+  - type: textarea
+    id: governance
+    attributes:
+      label: Effect on the platform's guarantees
+      description: >-
+        Would this change what can be modified after approval, who can approve,
+        what is recorded, or what a tenant can see? A feature that needs one of
+        those to bend is not impossible, but it needs a different conversation.
+      placeholder: None — this is additive and does not touch the approval path.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Does this belong to a planned phase?
+      description: See docs/architecture/20-implementation-plan.md
+      options:
+        - "No — new scope"
+        - "Yes — it is planned, and I want it sooner"
+        - "Not sure"
+    validations:
+      required: true

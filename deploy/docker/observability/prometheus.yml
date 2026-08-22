@@ -1,0 +1,33 @@
+# Local Prometheus configuration.
+#
+# The scrape targets match the local stack. In Kubernetes, scraping is driven by
+# ServiceMonitors instead — see deploy/helm/specforge/templates/servicemonitor.yaml.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: local
+    platform: specforge
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: specforge-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:9090"]
+        labels:
+          service: specforge-api
+
+  - job_name: specforge-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["worker:9090"]
+        labels:
+          service: specforge-worker
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
