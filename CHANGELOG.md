@@ -11,6 +11,16 @@ incompatible request or response shape.
 
 ## [Unreleased]
 
+### Fixed
+
+- `test/isolation/invariants.sql`: the assertion that the delete trigger refuses
+  sealed artifact versions never sealed one first, so the `DELETE` matched no
+  rows and the check reported a NOTE instead of exercising the trigger. It now
+  seals a version, fails the run if a sealed version is deleted, and has been
+  confirmed to fail when the trigger is dropped. The protection itself was
+  always in place; only the test was vacuous. The suite now reports 29 passing
+  assertions and no NOTEs.
+
 ## [1.0.0] — 2026-08-22
 
 The first release. Phase 1 of the implementation plan is complete and verified:
