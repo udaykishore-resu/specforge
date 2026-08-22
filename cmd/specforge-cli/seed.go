@@ -17,6 +17,7 @@ import (
 	"github.com/specforge/specforge/internal/platform/authz"
 	"github.com/specforge/specforge/internal/platform/cache"
 	"github.com/specforge/specforge/internal/platform/db"
+	"github.com/specforge/specforge/internal/platform/errors"
 	"github.com/specforge/specforge/internal/platform/id"
 	"github.com/specforge/specforge/internal/platform/log"
 	"github.com/specforge/specforge/internal/platform/objstore"
@@ -103,15 +104,33 @@ func seed(args []string) error {
 	analyst := seedPrincipal(authz.RoleBusinessAnalyst)
 	owner := seedPrincipal(authz.RoleProductOwner)
 
-	tenant, err := tenancyService.CreateTenant(ctx, tenancyapp.CreateTenantInput{
-		Slug: *slug, Name: "Acme Financial Services",
-		IsolationMode: types.IsolationShared, Region: "local",
-	}, admin)
-	if err != nil {
-		return fmt.Errorf("creating the demo tenant: %w", err)
+	// The seeder is idempotent by design. `make dev` is the documented way in,
+	// and people run it repeatedly — after a crash, after pulling, to get back
+	// to a known state. A seeder that fails the second time turns the entry
+	// point into something you have to remember not to run twice.
+	tenant, err := tenantRepo.GetBySlug(ctx, *slug)
+	if err != nil && errors.KindOf(err) != errors.KindNotFound {
+		return fmt.Errorf("looking for an existing demo tenant: %w", err)
 	}
-	if err := tenancyService.MarkProvisioned(ctx, tenant.ID); err != nil {
-		return fmt.Errorf("provisioning the demo tenant: %w", err)
+
+	if tenant == nil {
+		tenant, err = tenancyService.CreateTenant(ctx, tenancyapp.CreateTenantInput{
+			Slug: *slug, Name: "Acme Financial Services",
+			IsolationMode: types.IsolationShared, Region: "local",
+		}, admin)
+		if err != nil {
+			return fmt.Errorf("creating the demo tenant: %w", err)
+		}
+		if err := tenancyService.MarkProvisioned(ctx, tenant.ID); err != nil {
+			return fmt.Errorf("provisioning the demo tenant: %w", err)
+		}
+	} else {
+		logger.Info("reusing the existing demo tenant", "slug", tenant.Slug, "tenant_id", tenant.ID)
+		if tenant.Status == "PROVISIONING" {
+			if err := tenancyService.MarkProvisioned(ctx, tenant.ID); err != nil {
+				return fmt.Errorf("provisioning the demo tenant: %w", err)
+			}
+		}
 	}
 
 	analyst.TenantID = tenant.ID
@@ -131,18 +150,28 @@ func seed(args []string) error {
 		return fmt.Errorf("seeding the identity provider role mappings: %w", err)
 	}
 
-	project, err := tenancyService.CreateProject(ctx, tenancyapp.CreateProjectInput{
-		TenantID: tenant.ID, Key: "PAY", Name: "Payments Platform",
-		Description: "Card and account-to-account payments, with governed traceability.",
-	}, owner)
-	if err != nil {
-		return fmt.Errorf("creating the demo project: %w", err)
+	projectCtx := db.WithTenant(ctx, db.TenantContext{TenantID: tenant.ID, PrincipalID: owner.ID})
+	project, err := projectRepo.GetByKey(projectCtx, tenant.ID, "PAY")
+	if err != nil && errors.KindOf(err) != errors.KindNotFound {
+		return fmt.Errorf("looking for the existing demo project: %w", err)
+	}
+	if project == nil {
+		project, err = tenancyService.CreateProject(ctx, tenancyapp.CreateProjectInput{
+			TenantID: tenant.ID, Key: "PAY", Name: "Payments Platform",
+			Description: "Card and account-to-account payments, with governed traceability.",
+		}, owner)
+		if err != nil {
+			return fmt.Errorf("creating the demo project: %w", err)
+		}
+	} else {
+		logger.Info("reusing the existing demo project", "key", project.Key, "project_id", project.ID)
 	}
 
-	requirement, err := approveSeed(ctx, artifactService, tenant.ID, project.ID,
+	requirement, err := approveSeed(ctx, artifactService, graphRepo, tenant.ID, project.ID,
 		analyst, owner, artifactapp.CreateInput{
 			TenantID: tenant.ID, ProjectID: project.ID,
-			Area: "PAY", Type: types.ArtifactRequirement,
+			ArtifactID: "REQ-PAY-001",
+			Area:       "PAY", Type: types.ArtifactRequirement,
 			Title: "High-value payments require step-up authentication",
 			Content: json.RawMessage(`{
 			  "statement":"A payment above the tenant's high-value threshold must require a second authentication factor within the last 15 minutes.",
@@ -154,10 +183,11 @@ func seed(args []string) error {
 		return err
 	}
 
-	spec, err := approveSeed(ctx, artifactService, tenant.ID, project.ID,
+	spec, err := approveSeed(ctx, artifactService, graphRepo, tenant.ID, project.ID,
 		analyst, owner, artifactapp.CreateInput{
 			TenantID: tenant.ID, ProjectID: project.ID,
-			Area: "PAY", Type: types.ArtifactSpecification,
+			ArtifactID: "SPEC-PAY-001",
+			Area:       "PAY", Type: types.ArtifactSpecification,
 			Title:  "Step-up authentication for high-value payments",
 			Source: &types.ArtifactRef{ArtifactID: requirement.ArtifactID, Version: 1},
 			Content: json.RawMessage(`{
@@ -179,13 +209,15 @@ func seed(args []string) error {
 		return err
 	}
 
+	// A duplicate link is a conflict, not a failure of the seed: the graph
+	// already says what this call was going to say.
 	if _, err := artifactService.CreateLink(ctx, artifactapp.LinkInput{
 		TenantID: tenant.ID, ProjectID: project.ID,
 		From: types.ArtifactRef{ArtifactID: spec.ArtifactID, Version: 1},
 		To:   types.ArtifactRef{ArtifactID: requirement.ArtifactID, Version: 1},
 		Type: types.LinkDerivedFrom, Origin: types.OriginHuman, Confidence: 1.0,
 		Rationale: "The specification was written directly from the approved requirement.",
-	}, analyst); err != nil {
+	}, analyst); err != nil && errors.KindOf(err) != errors.KindConflict {
 		return fmt.Errorf("linking the specification to the requirement: %w", err)
 	}
 
@@ -219,10 +251,30 @@ provider issues tokens scoped to this tenant.
 	return nil
 }
 
-func approveSeed(ctx context.Context, svc *artifactapp.Service,
+// approveSeed creates an artifact and walks it to APPROVED, or returns the
+// version that is already approved.
+//
+// The "already there" branch is what makes a second `make seed` a no-op instead
+// of an error. It deliberately returns the existing version rather than
+// creating a revision: re-running the seeder should leave the demo where it
+// was, not accumulate versions on every invocation.
+func approveSeed(ctx context.Context, svc *artifactapp.Service, repo *artifactinfra.Postgres,
 	tenantID types.TenantID, projectID types.ProjectID,
 	author, approver authz.Principal, in artifactapp.CreateInput,
 	comment string) (*artifactdomain.Version, error) {
+
+	if in.ArtifactID != "" {
+		scoped := db.WithTenant(ctx, db.TenantContext{
+			TenantID: tenantID, ProjectID: &projectID, PrincipalID: author.ID,
+		})
+		existing, err := repo.ApprovedVersion(scoped, tenantID, projectID, in.ArtifactID)
+		if err != nil && errors.KindOf(err) != errors.KindNotFound {
+			return nil, fmt.Errorf("checking for an existing %s: %w", in.ArtifactID, err)
+		}
+		if existing != nil {
+			return existing, nil
+		}
+	}
 
 	v, err := svc.Create(ctx, in, author)
 	if err != nil {

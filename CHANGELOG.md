@@ -13,6 +13,13 @@ incompatible request or response shape.
 
 ### Fixed
 
+- `specforge-cli seed` is now idempotent, so `make dev` can be run repeatedly.
+  It previously failed on the second run with `tenant.slug_taken`, which made
+  the documented entry point something you had to remember not to run twice.
+  The tenant, project, both artifacts and the trace link are each reused when
+  they already exist; three consecutive runs now leave identical content
+  hashes and no extra rows.
+
 - `test/isolation/invariants.sql`: the assertion that the delete trigger refuses
   sealed artifact versions never sealed one first, so the `DELETE` matched no
   rows and the check reported a NOTE instead of exercising the trigger. It now
