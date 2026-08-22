@@ -77,7 +77,7 @@ func run() error {
 	}
 	defer func() { _ = cacheStore.Close() }()
 
-	contentStore, evidenceStore, err := openObjectStores(cfg)
+	contentStore, evidenceStore, err := openObjectStores(cfg, database)
 	if err != nil {
 		return err
 	}
@@ -138,20 +138,16 @@ func openCache(ctx context.Context, cfg config.Config) (cache.Cache, error) {
 	}
 }
 
-func openObjectStores(cfg config.Config) (content, evidence objstore.Store, err error) {
-	switch cfg.ObjStore.Provider {
-	case "fs":
-		fs, err := objstore.NewFS(cfg.ObjStore.Root)
-		if err != nil {
-			return nil, nil, fmt.Errorf("opening object store: %w", err)
-		}
-		// One filesystem store backs both buckets; the bucket name is the
-		// top-level directory, so content and evidence remain separated.
-		return fs, fs, nil
-	default:
-		return nil, nil, fmt.Errorf("object store provider %q is not supported in this build",
-			cfg.ObjStore.Provider)
+// openObjectStores builds the content and evidence stores.
+//
+// One store backs both: the bucket name separates them, so content and evidence
+// never share a namespace even though they share an adapter.
+func openObjectStores(cfg config.Config, database *db.DB) (content, evidence objstore.Store, err error) {
+	store, err := objstore.Open(cfg.ObjStore.Provider, cfg.ObjStore.Root, database.SQL())
+	if err != nil {
+		return nil, nil, err
 	}
+	return store, store, nil
 }
 
 func openPublisher(cfg config.Config, logger *slog.Logger) (outbox.Publisher, error) {

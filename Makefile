@@ -165,7 +165,7 @@ dev: ## Start the full local stack, migrate and seed
 	@echo "  Dev IdP    http://localhost:8081/.well-known/openid-configuration"
 	@echo "  Grafana    http://localhost:3001"
 	@echo "  Jaeger     http://localhost:16686"
-	@echo "  MinIO      http://localhost:9001"
+	@echo "  Prometheus http://localhost:9091"
 	@echo
 	@echo "  Check all of it:  make smoke"
 

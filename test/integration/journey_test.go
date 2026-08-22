@@ -91,7 +91,16 @@ func newHarness(t *testing.T) *harness {
 
 	database := db.FromSQL(sdb, 15*time.Second)
 
-	store, err := objstore.NewFS(t.TempDir())
+	// The forward journey runs against the database-backed store by default,
+	// because that is what the local stack and a production deployment both
+	// use, and a journey that only ever exercises the filesystem adapter would
+	// not have caught the day the other one was wired in wrong.
+	// SF_TEST_OBJSTORE=fs runs the same journey against the filesystem adapter.
+	provider := os.Getenv("SF_TEST_OBJSTORE")
+	if provider == "" {
+		provider = "db"
+	}
+	store, err := objstore.Open(provider, t.TempDir(), sdb)
 	if err != nil {
 		t.Fatalf("object store: %v", err)
 	}

@@ -72,7 +72,7 @@ func seed(args []string) error {
 
 	logger := log.New(log.Options{Level: "info", Format: "text", ServiceName: "seed"})
 
-	store, err := objstore.NewFS(cfg.ObjStore.Root)
+	store, err := objstore.Open(cfg.ObjStore.Provider, cfg.ObjStore.Root, database.SQL())
 	if err != nil {
 		return err
 	}

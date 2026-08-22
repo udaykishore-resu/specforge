@@ -22,8 +22,6 @@ IDP="${SF_SMOKE_IDP:-http://localhost:8081}"
 GRAFANA="${SF_SMOKE_GRAFANA:-http://localhost:3001}"
 JAEGER="${SF_SMOKE_JAEGER:-http://localhost:16686}"
 PROM="${SF_SMOKE_PROM:-http://localhost:9091}"
-MINIO="${SF_SMOKE_MINIO:-http://localhost:9000}"
-MINIO_CONSOLE="${SF_SMOKE_MINIO_CONSOLE:-http://localhost:9001}"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -126,7 +124,9 @@ expect_status "anonymous request is rejected" 401 "$API/api/v1/auth/me"
 
 READY="$(body "$API/readyz")"
 case "$READY" in
-*'"status":"ok"'* | *'"status": "ok"'*) ok "readiness reports its dependencies healthy" ;;
+*'"ready":true'* | *'"ready": true'*)
+	ok "readiness: $(printf '%s' "$READY" | sed -n 's/.*"checks":{\([^}]*\)}.*/\1/p' | tr -d '"')"
+	;;
 "") no "readiness reports its dependencies healthy" "no response from $API/readyz" ;;
 *) no "readiness reports its dependencies healthy" "$READY" ;;
 esac
@@ -244,7 +244,7 @@ fi
 section "Governance"
 
 PROJECTS="$(auth "$OWNER" "$API/api/v1/tenants/$TENANT/projects")"
-PROJECT="$(printf '%s' "$PROJECTS" | tr ',' '\n' | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | head -1)"
+PROJECT="$(printf '%s' "$PROJECTS" | tr ',' '\n' | sed -n 's/.*"project_id":"\([^"]*\)".*/\1/p' | head -1)"
 if [ -n "$PROJECT" ]; then
 	ok "the demo project is visible: $PROJECT"
 else
@@ -270,14 +270,14 @@ if [ -n "$PROJECT" ]; then
 
 	# Traceability. The seeded specification derives from the seeded requirement,
 	# so an upstream query from the specification must reach it.
-	UP="$(auth "$OWNER" "$BASE/trace/upstream?artifact_id=SPEC-PAY-001")"
+	UP="$(auth "$OWNER" "$BASE/trace/upstream?artifact=SPEC-PAY-001")"
 	if printf '%s' "$UP" | grep -q 'REQ-PAY-001'; then
 		ok "trace upstream: SPEC-PAY-001 reaches REQ-PAY-001"
 	else
 		no "trace upstream: SPEC-PAY-001 reaches REQ-PAY-001" "${UP:-no response}"
 	fi
 
-	IMPACT="$(auth "$OWNER" "$BASE/trace/impact?artifact_id=REQ-PAY-001")"
+	IMPACT="$(auth "$OWNER" "$BASE/trace/impact?artifact=REQ-PAY-001")"
 	if printf '%s' "$IMPACT" | grep -q 'SPEC-PAY-001'; then
 		ok "impact analysis: changing REQ-PAY-001 affects SPEC-PAY-001"
 	else
@@ -293,24 +293,32 @@ if [ -n "$PROJECT" ]; then
 		no "an auditor can read the approval evidence" "${EVIDENCE:-no response}"
 	fi
 
-	# Authorization. A viewer holds no approval permission, and the route
-	# declares one, so this must be refused — with 403, not 401: the caller is
+	# Authorization. A viewer holds no artifact:create permission and the route
+	# declares one, so this must be refused with 403 — not 401: the caller is
 	# authenticated and simply not permitted.
-	got="$(auth_status "$VIEWER" -X POST "$BASE/artifacts/REQ-PAY-001/versions/1/approve" \
-		-H 'Content-Type: application/json' -d '{"comment":"smoke test"}')"
+	#
+	# Creation rather than approval, deliberately. Approving the seeded version
+	# fails its status precondition first and returns 412, which would look like
+	# a pass while testing nothing about authorization.
+	got="$(auth_status "$VIEWER" -X POST "$BASE/artifacts" \
+		-H 'Content-Type: application/json' \
+		-d '{"type":"REQUIREMENT","title":"smoke test","content":{"statement":"smoke"}}')"
 	case "$got" in
-	403) ok "a viewer cannot approve (403)" ;;
-	401) no "a viewer cannot approve" "got 401 — the token was rejected before authorization was reached" ;;
-	2*) no "a viewer cannot approve" "got $got — AUTHORIZATION IS NOT BEING ENFORCED" ;;
-	*) ok "a viewer cannot approve ($got)" ;;
+	403) ok "a viewer cannot create an artifact (403)" ;;
+	401) no "a viewer cannot create an artifact" "got 401 — the token was rejected before authorization was reached" ;;
+	2*) no "a viewer cannot create an artifact" "got $got — AUTHORIZATION IS NOT BEING ENFORCED" ;;
+	*) no "a viewer cannot create an artifact" "got $got, expected 403 — authorization was not the thing that refused" ;;
 	esac
 
 	# Immutability. An approved version is sealed; editing it must be refused by
 	# the state machine rather than accepted and silently ignored.
 	got="$(auth_status "$OWNER" -X PUT "$BASE/artifacts/REQ-PAY-001/versions/1" \
-		-H 'Content-Type: application/json' -d '{"title":"rewritten by the smoke test"}')"
+		-H 'Content-Type: application/json' \
+		-d '{"content":{"statement":"rewritten by the smoke test"}}')"
 	case "$got" in
 	2*) no "an APPROVED version cannot be edited" "got $got — AN APPROVED ARTIFACT WAS MUTATED" ;;
+	400) no "an APPROVED version cannot be edited" \
+		"got 400 — the body was rejected before immutability was reached, so this proved nothing" ;;
 	*) ok "an APPROVED version cannot be edited ($got)" ;;
 	esac
 fi
@@ -428,27 +436,38 @@ fi
 
 section "Object store"
 
-if [ "$(status "$MINIO/minio/health/live")" = "200" ]; then
-	ok "MinIO is up — console at $MINIO_CONSOLE (specforge / specforge-dev-secret)"
-else
-	no "MinIO is up" "no response from $MINIO/minio/health/live"
-fi
-
-# Bucket state is checked through the running container's own client rather than
-# by signing S3 requests here, because a hand-rolled signature that fails proves
-# nothing about the store.
-if command -v docker >/dev/null 2>&1; then
-	LOCK="$(docker run --rm --network specforge_default minio/mc:RELEASE.2024-10-08T09-37-26Z \
-		/bin/sh -c "mc alias set l http://minio:9000 specforge specforge-dev-secret >/dev/null 2>&1 && \
-                mc retention info --default l/sf-evidence 2>/dev/null" 2>/dev/null)"
-	if printf '%s' "$LOCK" | grep -qi 'GOVERNANCE'; then
-		ok "the evidence bucket has object-lock retention set"
+# Objects live in PostgreSQL, so the checks that matter are about the write-once
+# guarantee rather than about a service being up. The evidence read above
+# already proves the store is readable; this proves it is not rewritable.
+if command -v psql >/dev/null 2>&1; then
+	DSN="${SF_DB_DSN:-host=127.0.0.1 port=5432 user=specforge password=specforge dbname=specforge sslmode=disable}"
+	COUNTS="$(psql "$DSN" -tAF' ' -c \
+		"SELECT bucket, count(*), count(*) FILTER (WHERE locked) FROM objects GROUP BY 1 ORDER BY 1" 2>/dev/null)"
+	if [ -n "$COUNTS" ]; then
+		ok "objects stored: $(printf '%s' "$COUNTS" | tr '\n' ';' | sed 's/;$//')"
 	else
-		sk "the evidence bucket has object-lock retention set" \
-			"could not read it from here; check by hand: docker compose -f deploy/docker/docker-compose.yml run --rm minio-init sh -c 'mc alias set l http://minio:9000 specforge specforge-dev-secret && mc retention info --default l/sf-evidence'"
+		no "the object store holds the seeded content" "no rows in objects — has \`make seed\` run?"
 	fi
+
+	LOCKED="$(psql "$DSN" -tAc \
+		"SELECT count(*) FROM objects WHERE bucket = 'sf-evidence' AND locked AND retain_until > now()" 2>/dev/null)"
+	if [ "${LOCKED:-0}" -ge 1 ]; then
+		ok "approval evidence is under retention ($LOCKED object(s))"
+	else
+		no "approval evidence is under retention" \
+			"evidence that is not locked is not evidence"
+	fi
+
+	# The guarantee itself, tested rather than asserted.
+	REFUSED="$(psql "$DSN" -v ON_ERROR_STOP=0 -c \
+		"UPDATE objects SET body = 'tampered' WHERE bucket = 'sf-evidence' AND locked" 2>&1 || true)"
+	case "$REFUSED" in
+	*"under retention"*) ok "a locked object refuses to be overwritten" ;;
+	*UPDATE*0*) sk "a locked object refuses to be overwritten" "no locked object to try it on" ;;
+	*) no "a locked object refuses to be overwritten" "the UPDATE was not refused: $REFUSED" ;;
+	esac
 else
-	sk "the evidence bucket has object-lock retention set" "docker is not available here"
+	sk "the write-once guarantee holds" "psql is not installed here; run: make test-isolation"
 fi
 
 # ------------------------------------------------------------ summary ------

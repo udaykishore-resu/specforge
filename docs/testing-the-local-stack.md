@@ -1,6 +1,6 @@
 # Testing the local stack
 
-`make dev` prints six URLs. This is how to check each of them, and — more
+`make dev` prints the URLs it started. This is how to check each of them, and — more
 usefully — how to check the things they exist to serve.
 
 The short version:
@@ -145,8 +145,8 @@ PROJECT=$(curl -s -H "Authorization: Bearer $TOKEN" \
 BASE="localhost:8080/api/v1/tenants/$TENANT/projects/$PROJECT"
 
 curl -s -H "Authorization: Bearer $TOKEN" "$BASE/artifacts"
-curl -s -H "Authorization: Bearer $TOKEN" "$BASE/trace/upstream?artifact_id=SPEC-PAY-001"
-curl -s -H "Authorization: Bearer $TOKEN" "$BASE/trace/impact?artifact_id=REQ-PAY-001"
+curl -s -H "Authorization: Bearer $TOKEN" "$BASE/trace/upstream?artifact=SPEC-PAY-001"
+curl -s -H "Authorization: Bearer $TOKEN" "$BASE/trace/impact?artifact=REQ-PAY-001"
 ```
 
 Then the two refusals that matter:
@@ -206,6 +206,8 @@ Worth watching while you walk the console journey above:
   stay near zero; a rising value means the worker is not draining the outbox.
 - `sf_security_events_total` — increments on each refusal, so the 401s and 403s
   you produce above should show up here.
+- `sf_outbox_pending` — the number of events awaiting publication, published by
+  the worker every thirty seconds.
 
 Prometheus itself is at http://localhost:9091; check http://localhost:9091/targets
 if a panel is empty, and http://localhost:9091/alerts for the rules.
@@ -220,26 +222,46 @@ connection that ran the query.
 If the service list is empty, the collector has not received anything —
 `docker compose logs otel-collector`.
 
-## MinIO — http://localhost:9001
+## Objects — in PostgreSQL
 
-Sign in with `specforge` / `specforge-dev-secret`. Three buckets:
-
-| Bucket        | Holds                     | Object Lock |
-| ------------- | ------------------------- | ----------- |
-| `sf-content`  | artifact content, by hash | no          |
-| `sf-evidence` | approval evidence         | yes         |
-| `sf-audit`    | audit anchors             | yes         |
-
-The lock is the point. Try deleting an object from `sf-evidence` in the console:
-it is refused while the retention period holds, and it is refused for the root
-credentials too. That is what makes the evidence survive an attacker who reaches
-the keys.
+There is no object-storage service to open. Artifact content, approval evidence
+and audit anchors live in the `objects` table, and the buckets are a column.
 
 ```bash
-docker compose -f deploy/docker/docker-compose.yml run --rm --entrypoint sh minio-init -c \
-  'mc alias set l http://minio:9000 specforge specforge-dev-secret >/dev/null &&
-   mc retention info --default l/sf-evidence'
+psql "$SF_DB_DSN" -c "
+  SELECT bucket, count(*), count(*) FILTER (WHERE locked) AS locked,
+         min(retain_until)::date AS earliest_retention
+    FROM objects GROUP BY bucket ORDER BY bucket"
 ```
+
+You should see unlocked rows in `sf-content` and locked rows in `sf-evidence`
+with a retention date seven years out.
+
+The guarantee is worth testing rather than reading. Every one of these must be
+refused, and the last one must show the evidence unchanged:
+
+```bash
+psql "$SF_DB_DSN" <<'SQL'
+UPDATE objects SET body = 'tampered'      WHERE bucket = 'sf-evidence' AND locked;
+DELETE FROM objects                       WHERE bucket = 'sf-evidence' AND locked;
+UPDATE objects SET retain_until = now()   WHERE bucket = 'sf-evidence' AND locked;
+UPDATE objects SET locked = false         WHERE bucket = 'sf-evidence' AND locked;
+SELECT bucket, locked, retain_until::date, length(body) FROM objects WHERE locked;
+SQL
+```
+
+That is as the database owner — a stronger position than anyone reaching the
+application would have. `make test-isolation` runs the same assertions and fails
+the build if any of them stops holding.
+
+Unlocked content, by contrast, is collectable:
+
+```bash
+psql "$SF_DB_DSN" -c "DELETE FROM objects WHERE bucket = 'sf-content'"   # succeeds
+```
+
+(Do that on a scratch database. Content is re-derivable from the artifact rows,
+but there is no reason to make work for yourself.)
 
 ---
 
@@ -254,6 +276,7 @@ make verify-release     # all of the above, plus the version checks
 
 `make test-isolation` is the one to run if you change a migration. It asserts,
 directly against the database, that one tenant cannot read another's rows, that
-sealed artifact versions cannot be deleted, and that the audit table refuses
-mutation — without going through the application, which is the layer those
-guarantees are meant to survive.
+sealed artifact versions cannot be deleted, that the audit table refuses
+mutation, and that locked evidence objects refuse overwriting, deletion and any
+shortening of their retention — all without going through the application, which
+is the layer those guarantees are meant to survive.

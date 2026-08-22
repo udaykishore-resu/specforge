@@ -48,9 +48,22 @@ DECLARE
   p_b uuid := 'bbbbbbbb-0000-4000-8000-000000000001';
   u   uuid := '99999999-9999-4999-8999-999999999999';
 BEGIN
-  DELETE FROM trace_links;
-  DELETE FROM audit_sequences;
-  DELETE FROM outbox_events;
+  -- TRUNCATE, not DELETE, and deliberately so.
+  --
+  -- This suite seals artifact versions and locks evidence objects on purpose,
+  -- and sealed rows refuse DELETE — that refusal is one of the things being
+  -- asserted below. A DELETE-based reset would therefore make the suite
+  -- runnable exactly once per database, and the second run would fail on the
+  -- first run's evidence rather than on a real defect.
+  --
+  -- TRUNCATE does not fire row-level DELETE triggers. That is not a hole in the
+  -- invariant: TRUNCATE requires table ownership, which the application role
+  -- (sf_app) does not have, and section 9 still proves that DELETE is refused
+  -- even for the owner. Using it here keeps the reset honest and the suite
+  -- re-runnable.
+  TRUNCATE trace_links, artifact_versions, artifacts, outbox_events,
+           audit_records, audit_sequences, audit_anchors, objects
+        RESTART IDENTITY CASCADE;
 
   INSERT INTO tenants (id, slug, name, status, isolation_mode, created_by)
   VALUES (t_a, 'tenant-alpha', 'Alpha', 'ACTIVE', 'shared', u),
@@ -428,6 +441,87 @@ BEGIN
     WHEN check_violation THEN
       RAISE NOTICE 'PASS  Immutability: the delete trigger refuses sealed versions even for the table owner';
   END;
+END $$;
+
+
+-- ---------------------------------------------------------------------------
+-- 10. Object store: write-once retention
+--
+-- Approval evidence lives in the objects table when the db provider is in use.
+-- The claim is that a locked object cannot be altered or removed by anyone with
+-- a connection to this database, including the table owner running this script.
+-- These assertions are the claim, tested.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+  survived text;
+BEGIN
+  INSERT INTO objects (bucket, key, digest, size_bytes, body, locked, retain_until)
+  VALUES ('sf-isolation-probe', 'evidence/probe',
+          'sha256:' || encode(sha256('original'::bytea), 'hex'),
+          8, 'original', true, now() + interval '7 days');
+
+  -- 10a. Overwriting locked content.
+  BEGIN
+    UPDATE objects
+       SET body   = 'tampered',
+           digest = 'sha256:' || encode(sha256('tampered'::bytea), 'hex')
+     WHERE bucket = 'sf-isolation-probe' AND key = 'evidence/probe';
+    RAISE EXCEPTION 'FAIL  Object lock: LOCKED EVIDENCE WAS OVERWRITTEN by the table owner';
+  EXCEPTION
+    WHEN check_violation THEN
+      RAISE NOTICE 'PASS  Object lock: a locked object cannot be overwritten';
+  END;
+
+  -- 10b. Deleting locked content.
+  BEGIN
+    DELETE FROM objects WHERE bucket = 'sf-isolation-probe' AND key = 'evidence/probe';
+    RAISE EXCEPTION 'FAIL  Object lock: LOCKED EVIDENCE WAS DELETED by the table owner';
+  EXCEPTION
+    WHEN check_violation THEN
+      RAISE NOTICE 'PASS  Object lock: a locked object cannot be deleted';
+  END;
+
+  -- 10c. Shortening retention. This is the first move of anyone who wants to
+  -- delete evidence and be able to say the retention had expired.
+  BEGIN
+    UPDATE objects SET retain_until = now() - interval '1 day'
+     WHERE bucket = 'sf-isolation-probe' AND key = 'evidence/probe';
+    RAISE EXCEPTION 'FAIL  Object lock: retention was SHORTENED on a locked object';
+  EXCEPTION
+    WHEN check_violation THEN
+      RAISE NOTICE 'PASS  Object lock: retention cannot be shortened';
+  END;
+
+  -- 10d. Releasing the lock.
+  BEGIN
+    UPDATE objects SET locked = false
+     WHERE bucket = 'sf-isolation-probe' AND key = 'evidence/probe';
+    RAISE EXCEPTION 'FAIL  Object lock: the lock was REMOVED from a locked object';
+  EXCEPTION
+    WHEN check_violation THEN
+      RAISE NOTICE 'PASS  Object lock: the lock cannot be removed';
+  END;
+
+  -- 10e. A locked object with no retention date would be locked by accident
+  -- rather than by policy.
+  BEGIN
+    INSERT INTO objects (bucket, key, digest, size_bytes, body, locked)
+    VALUES ('sf-isolation-probe', 'evidence/no-retention',
+            'sha256:' || encode(sha256('x'::bytea), 'hex'), 1, 'x', true);
+    RAISE EXCEPTION 'FAIL  Object lock: a locked object was accepted with no retention date';
+  EXCEPTION
+    WHEN check_violation THEN
+      RAISE NOTICE 'PASS  Object lock: a lock requires an explicit retention date';
+  END;
+
+  -- 10f. After all of that, the original bytes must be exactly as written.
+  SELECT convert_from(body, 'UTF8') INTO survived
+    FROM objects WHERE bucket = 'sf-isolation-probe' AND key = 'evidence/probe';
+  IF survived IS DISTINCT FROM 'original' THEN
+    RAISE EXCEPTION 'FAIL  Object lock: evidence content changed to %', survived;
+  END IF;
+  RAISE NOTICE 'PASS  Object lock: the evidence survived every attempt intact';
 END $$;
 
 DO $$ BEGIN RAISE NOTICE '--- all database invariants verified ---'; END $$;

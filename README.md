@@ -37,6 +37,7 @@ tests and deployments — and it can answer, from data rather than from memory:
 - [Identity, authentication and the console](#identity-authentication-and-the-console)
 - [Authorization and separation of duties](#authorization-and-separation-of-duties)
 - [Tenant isolation](#tenant-isolation)
+- [Where objects live](#where-objects-live)
 - [Events without dual writes](#events-without-dual-writes)
 - [The audit trail](#the-audit-trail)
 - [Where the AI sits](#where-the-ai-sits)
@@ -60,8 +61,8 @@ to run things outside containers.
 make dev
 ```
 
-That starts PostgreSQL, Redis, Redpanda, MinIO (with object lock), the OTel
-collector, Jaeger, Prometheus and Grafana; applies the migrations; seeds a
+That starts PostgreSQL, Redis, Redpanda, the OTel collector, Jaeger,
+Prometheus and Grafana; applies the migrations; seeds a
 worked example — an approved requirement, a specification derived from it, an
 accepted trace link between them, and a verifiable audit chain — and wires the
 development identity provider to the seeded tenant.
@@ -73,13 +74,13 @@ development identity provider to the seeded tenant.
 | Dev identity  | http://localhost:8081/.well-known/openid-configuration     |
 | Grafana       | http://localhost:3001                                      |
 | Jaeger        | http://localhost:16686                                     |
-| MinIO console | http://localhost:9001                                      |
+| Prometheus    | http://localhost:9091                                      |
 
 Sign in as any of the twelve seeded roles. Start as **Analyst** to see a draft
 move through review, then as **Owner** to approve it — the platform will refuse
 to let the same person do both.
 
-To check that all six are actually working, and that the guarantees behind them
+To check that all of it is actually working, and that the guarantees behind it
 hold:
 
 ```bash
@@ -134,9 +135,10 @@ flowchart TB
     subgraph state["State"]
         pg[("PostgreSQL 16<br/>row-level security<br/>immutability triggers")]
         redis[("Redis<br/>cache and rate limits")]
-        content[("sf-content<br/>canonical bytes by hash")]
-        evidence[("sf-evidence<br/>OBJECT LOCK")]
-        anchors[("sf-audit<br/>OBJECT LOCK")]
+        subgraph objects["Object store — buckets in PostgreSQL"]
+            content[("sf-content<br/>canonical bytes, keyed by hash")]
+            evidence[("sf-evidence<br/>approval evidence and audit anchors<br/>WRITE-ONCE, trigger enforced")]
+        end
     end
 
     bus["Event bus<br/>Kafka or Redpanda"]
@@ -167,12 +169,12 @@ flowchart TB
     modartifact --> content
     modartifact --> evidence
     modartifact --> modai
-    modaudit --> anchors
+    modaudit --> evidence
     modai --> llm
 
     pg -->|"transactional outbox"| worker
     worker --> bus
-    worker --> anchors
+    worker --> evidence
 
     apisvc --> otel
     worker --> otel
@@ -460,7 +462,7 @@ sequenceDiagram
 
     Worker->>PG: poll the outbox
     Worker->>Worker: publish artifact.approved at least once
-    Worker->>OS: publish an audit anchor to sf-audit, hourly
+    Worker->>OS: publish an audit anchor, write-once, hourly
 ```
 
 Four things about that ordering:
@@ -669,6 +671,48 @@ query is an empty result and a confused developer, not a data breach.
 
 ---
 
+## Where objects live
+
+Three kinds of blob exist: canonical artifact content, approval evidence, and
+audit anchors. Two of the three must be write-once, and "write-once" has to be
+a property of the store rather than a promise made by the code that writes to
+it — evidence the application can overwrite is not evidence.
+
+They are stored in PostgreSQL, in an `objects` table keyed by `(bucket, key)`.
+Buckets and tenant-prefixed keys are exactly what a cloud object store would
+use, so no application code knows the difference.
+
+| Bucket        | Key prefix       | Holds                          | Locked |
+| ------------- | ---------------- | ------------------------------ | ------ |
+| `sf-content`  | `content/`       | canonical bytes, keyed by hash | no     |
+| `sf-evidence` | `evidence/`      | approval evidence              | yes    |
+| `sf-evidence` | `audit-anchors/` | audit chain anchors            | yes    |
+
+Retention is enforced by a trigger, which refuses four things on a locked row:
+
+- **overwriting it** — with one exception, a byte-identical rewrite, which is a
+  no-op so that a retried approval does not fail merely for being a retry;
+- **deleting it**;
+- **shortening its retention** — the first move of anyone who wants to delete
+  evidence and be able to say the retention had already expired;
+- **releasing the lock**.
+
+Because it is a trigger, an application bug, a stray migration and a direct
+`psql` session all hit the same wall. `make test-isolation` asserts each of the
+four directly against the database, as the table owner, which is a stronger
+position than any attacker reaching the application would hold.
+
+A second adapter stores objects on the local filesystem
+(`SF_OBJSTORE_PROVIDER=fs`); it enforces the same rules in application code,
+which is a weaker place to enforce them, and the configuration validator refuses
+it in production for that reason. Both adapters are held to one conformance
+suite, because the risk with two implementations of an interface is not that one
+of them fails — it is that they quietly disagree.
+
+There is no S3 adapter yet. `SF_OBJSTORE_PROVIDER=s3` is refused at startup with
+a message naming what this build does support, rather than accepted and
+discovered later.
+
 ## Events without dual writes
 
 A state change, its audit record and its domain event commit in one transaction.
@@ -723,8 +767,8 @@ flowchart TB
         rec --> tbl[("audit_records<br/>UPDATE and DELETE refused<br/>by trigger, even for the owner")]
     end
 
-    tbl --> anchor["Worker, hourly<br/>anchor = head sequence + head hash"]
-    anchor --> locked[("sf-audit<br/>OBJECT LOCK, write-once")]
+    tbl --> anchor["Worker — on start, then hourly<br/>anchor = head sequence + head hash"]
+    anchor --> locked[("sf-evidence/audit-anchors/<br/>WRITE-ONCE<br/>a trigger refuses overwrite,<br/>delete and any retention cut")]
 
     subgraph verify["Verifying"]
         direction TB
@@ -852,11 +896,9 @@ flowchart TB
     end
 
     subgraph aws["Managed state"]
-        aurora[("Aurora PostgreSQL<br/>encrypted, point-in-time recovery")]
-        s3c[("S3 sf-content")]
-        s3e[("S3 sf-evidence<br/>Object Lock COMPLIANCE")]
-        s3a[("S3 sf-audit<br/>Object Lock COMPLIANCE")]
+        aurora[("Aurora PostgreSQL<br/>encrypted, point-in-time recovery<br/>holds rows AND objects")]
         secrets["Secrets Manager<br/>no secret in an image or a chart"]
+        backup[("Snapshots and PITR<br/>the objects are in the backup<br/>because they are in the database")]
     end
 
     registry["ghcr.io<br/>images with SLSA provenance<br/>and an SBOM"]
@@ -864,10 +906,8 @@ flowchart TB
     ingress --> webpod
     webpod -->|"server to server"| apipod
     apipod --> aurora
-    apipod --> s3c
-    apipod --> s3e
     workerpod --> aurora
-    workerpod --> s3a
+    aurora --> backup
     migjob -->|"runs before any new pod starts"| aurora
     netpol -.-> apipod
     sa -.-> apipod
@@ -875,10 +915,13 @@ flowchart TB
     registry -.->|"attestation verified before it runs"| apipod
 ```
 
-- **Object Lock is `COMPLIANCE`, not `GOVERNANCE`.** Under `GOVERNANCE` a
-  sufficiently privileged principal can shorten the retention — and that
-  principal is exactly the one an attacker tries to become. Terraform refuses to
-  apply with object lock disabled, with an error that explains why.
+- **Write-once retention comes from the database, not from a storage tier.**
+  The evidence and anchor buckets are rows in `objects`, and migration 0005's
+  trigger refuses to overwrite one, to delete one, to shorten its retention or
+  to release its lock. The Terraform S3 module with Object Lock `COMPLIANCE` is
+  still in the repository for a deployment that later wants a separate tier;
+  the adapter for it is not written yet, and `SF_OBJSTORE_PROVIDER=s3` is
+  refused at startup rather than accepted and quietly ignored.
 - **The migration Job is a pre-install and pre-upgrade hook**, so schema changes
   land before any pod that assumes them starts.
 - **The chart has preconditions that refuse unsafe values** — a production
@@ -914,15 +957,16 @@ specforge-cli verify-evidence --file evidence.json --digest sha256:...
 | ------- | -------------- |
 | `make check` | gofmt, `go vet`, route lint, dependency lint, unit and contract tests |
 | `make test-integration` | the forward journey, four-eyes, tenancy, tampering — against a real PostgreSQL |
-| `make test-isolation` | 29 database invariants asserted directly in SQL |
+| `make test-isolation` | 35 database invariants asserted directly in SQL |
 | `make smoke` | a running stack, end to end, including the refusals |
 | `make verify-release` | all of the above plus the chart/tag/binary version agreement |
 
 `make test-isolation` is the one to run if you only run one. It asserts, in SQL
 and without going through the application, that a tenant cannot read another
 tenant's rows, that an approved version cannot be modified or deleted **even by
-the table owner**, that an audit record cannot be updated, and that an API key
-cannot hold an approval permission.
+the table owner**, that an audit record cannot be updated, that a locked
+evidence object cannot be overwritten, deleted or have its retention shortened,
+and that an API key cannot hold an approval permission.
 
 The contract test holds `api/openapi/specforge.v1.yaml` against the live route
 table — every path, method, permission and enum. It has been mutation-tested:
@@ -946,7 +990,8 @@ touch:
 | `SF_AUTH_TENANT_CLAIM` / `SF_AUTH_ROLES_CLAIM` | claim names, matched by the console |
 | `SF_AUTH_STEP_UP_MAX_AGE` | how fresh authentication must be to approve |
 | `SF_GOV_FOUR_EYES` | tenant-wide four-eyes default |
-| `SF_OBJSTORE_*` | endpoint, buckets, credentials, object lock |
+| `SF_OBJSTORE_PROVIDER` | `db` (default in the stack) or `fs`; anything else is refused at startup |
+| `SF_OBJSTORE_CONTENT_BUCKET` / `_EVIDENCE_BUCKET` | bucket names |
 | `SF_LIMIT_RPS_PER_PRINCIPAL` / `_PER_TENANT` | rate limits |
 | `SF_LIMIT_MAX_GRAPH_DEPTH` | bounds every traversal |
 | `SF_OTEL_ENDPOINT` / `SF_OTEL_SAMPLE_RATIO` | telemetry |
@@ -984,7 +1029,7 @@ chart value with a default.** The fixed credentials in
 ├── test/
 │   ├── contract/         the OpenAPI document against the live route table
 │   ├── integration/      the forward journey, four-eyes, tenancy, tampering
-│   └── isolation/        29 database invariants as SQL assertions
+│   └── isolation/        35 database invariants as SQL assertions
 ├── tools/lintroutes/     fails the build on a route with no permission
 └── web/                  the Next.js console
 ```

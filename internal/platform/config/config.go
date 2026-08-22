@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/specforge/specforge/internal/platform/buildinfo"
+	"github.com/specforge/specforge/internal/platform/objstore"
 )
 
 // Env is the deployment environment.
@@ -86,8 +87,13 @@ type CacheConfig struct {
 }
 
 type ObjStoreConfig struct {
-	Provider       string // "fs" | "s3"
-	Root           string // filesystem root when Provider == "fs"
+	// Provider selects the adapter. See objstore.Providers for what this build
+	// contains; Validate refuses anything else at startup.
+	Provider string // "db" | "fs"
+	Root     string // filesystem root when Provider == "fs"
+	// Endpoint and Region are carried for a future S3 adapter and are ignored by
+	// the adapters that exist. They are kept so that moving to one is a
+	// configuration change rather than a schema change.
 	Endpoint       string
 	Region         string
 	ContentBucket  string
@@ -381,6 +387,13 @@ func (c *Config) Validate() error {
 	if c.DB.MaxOpenConns < 1 {
 		add("db.max_open_conns must be at least 1")
 	}
+	// Catch an unavailable object store adapter here, where the message reaches
+	// somebody, rather than at the first write — or, worse, in a crash loop
+	// whose only symptom is a container restarting every sixty seconds.
+	if !objstore.Supported(c.ObjStore.Provider) {
+		add("objstore.provider=%q is not available in this build; supported providers are %s",
+			c.ObjStore.Provider, strings.Join(objstore.ProviderNames(), ", "))
+	}
 	if c.Limits.MaxGraphDepth < 1 || c.Limits.MaxGraphDepth > 64 {
 		add("limits.max_graph_depth must be between 1 and 64")
 	}
@@ -409,7 +422,10 @@ func (c *Config) Validate() error {
 			add("objstore.object_lock must be enabled in production so approval evidence is immutable")
 		}
 		if c.ObjStore.Provider == "fs" {
-			add("objstore.provider=fs is not supported in production")
+			// The filesystem adapter enforces write-once in application code and
+			// on one node's disk. Neither survives the failure modes production
+			// has to survive.
+			add("objstore.provider=fs is not supported in production; use db")
 		}
 		if c.Events.Provider == "memory" {
 			add("events.provider=memory is not supported in production")

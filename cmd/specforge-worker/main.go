@@ -63,7 +63,7 @@ func run(roles []string) error {
 	}
 	defer func() { _ = database.Close() }()
 
-	store, err := objstore.NewFS(cfg.ObjStore.Root)
+	store, err := objstore.Open(cfg.ObjStore.Provider, cfg.ObjStore.Root, database.SQL())
 	if err != nil {
 		return fmt.Errorf("opening object store: %w", err)
 	}
@@ -149,7 +149,16 @@ func run(roles []string) error {
 }
 
 // every runs fn on an interval until the context is cancelled.
+// every runs fn immediately and then on an interval.
+//
+// Immediately matters. With a ticker alone, an hourly job does nothing for its
+// first hour, so a misconfiguration — an unreachable object store, a missing
+// permission — surfaces an hour after the deployment that caused it, long after
+// anyone is still watching. It also means a freshly seeded stack has no audit
+// anchor to verify against until the hour is up, which makes the platform's
+// strongest claim unavailable exactly when someone is first evaluating it.
 func every(ctx context.Context, d time.Duration, fn func(context.Context)) {
+	fn(ctx)
 	t := time.NewTicker(d)
 	defer t.Stop()
 	for {

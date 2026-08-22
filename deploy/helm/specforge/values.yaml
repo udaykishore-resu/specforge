@@ -136,11 +136,16 @@ cache:
 
 # ---------------------------------------------------------- Object storage ---
 objstore:
-  provider: s3
+  # db  objects live in PostgreSQL, with write-once retention enforced by a
+  #     trigger. The only adapter this build contains for production use.
+  # fs  local disk; refused in production by the configuration validator.
+  # The chart's precondition rejects anything else at template time rather than
+  # letting a release roll out and crash-loop.
+  provider: db
   region: ""
   endpoint: ""
-  contentBucket: ""
-  evidenceBucket: ""
+  contentBucket: "sf-content"
+  evidenceBucket: "sf-evidence"
   # Object lock is what makes approval evidence and audit anchors defensible.
   # Disabling it turns write-once storage into ordinary storage, so it defaults
   # on and the chart refuses to render without buckets when it is set.

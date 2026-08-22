@@ -158,6 +158,12 @@ Refuse to render a configuration that would quietly weaken a guarantee.
 {{- if and (eq .Values.environment "production") (not .Values.governance.fourEyes) -}}
 {{- fail "governance.fourEyes is disabled in production. If this is a deliberate, documented exception, set environment to something other than production for that cluster." -}}
 {{- end -}}
+{{- if not (has .Values.objstore.provider (list "db" "fs")) -}}
+{{- fail (printf "objstore.provider=%s is not available in this build. Supported: db (PostgreSQL, write-once enforced by a trigger) or fs (local disk, development only)." .Values.objstore.provider) -}}
+{{- end -}}
+{{- if eq .Values.objstore.provider "fs" -}}
+{{- fail "objstore.provider=fs enforces write-once retention in application code and on one node's disk. Neither survives what production has to survive. Use db." -}}
+{{- end -}}
 {{- if not .Values.objstore.objectLock -}}
 {{- fail "objstore.objectLock is disabled. Approval evidence and audit anchors are written once and depend on it; without object lock they are ordinary, overwritable objects." -}}
 {{- end -}}
