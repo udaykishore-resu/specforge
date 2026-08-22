@@ -87,6 +87,28 @@ json_string() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p" | head -1; }
 printf 'SpecForge smoke test\n'
 printf '  API %s   Web %s   IdP %s\n' "$API" "$WEB" "$IDP"
 
+# Preflight. If nothing is listening on the API at all, every check below fails
+# for the same reason, and thirteen identical failures say less than one line
+# does.
+if [ "$(status "$API/healthz")" = "000" ]; then
+	printf '\n  %s  Nothing is listening on %s\n\n' "$(red STOP)" "$API"
+	cat >&2 <<EOF
+        The stack is not running, or the API container is not up.
+
+          docker compose -f deploy/docker/docker-compose.yml ps
+          docker compose -f deploy/docker/docker-compose.yml logs --tail=50 api
+
+        If the api service is missing or exited, start it:
+
+          make dev
+
+        If it is running but unreachable, another process may hold port 8080:
+
+          lsof -nP -iTCP:8080 -sTCP:LISTEN
+EOF
+	exit 1
+fi
+
 # ---------------------------------------------------------------- API ------
 
 section "API — $API"
