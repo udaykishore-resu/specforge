@@ -377,16 +377,56 @@ RESET ROLE;
 --    sf_app has no DELETE privilege on artifact_versions (test 2 proved that);
 --    here we verify the trigger also refuses, as the owner.
 -- ===========================================================================
+-- The version this runs against must actually be sealed, or the DELETE matches
+-- nothing and the block reports success without exercising the trigger. An
+-- earlier revision of this test did exactly that: it emitted a NOTE and moved
+-- on, so the one guarantee it existed to prove was never checked. A test that
+-- cannot fail is worse than a missing test, because it reads like coverage.
 DO $$
+DECLARE
+  sealed_count integer;
 BEGIN
   PERFORM set_config('app.tenant_id','11111111-1111-4111-8111-111111111111', true);
+
+  -- Seal tenant A's fixture version so the trigger has something to refuse.
+  UPDATE artifact_versions
+     SET status            = 'APPROVED',
+         approved_by       = '44444444-4444-4444-8444-444444444444',
+         approved_at       = now(),
+         approval_comment  = 'sealed so the delete trigger can be exercised',
+         approval_evidence = jsonb_build_object(
+           'evidence_id', 'EVD-del-probe',
+           'digest', 'sha256:0000000000000000000000000000000000000000000000000000000000000000',
+           'media_type', 'application/vnd.specforge.approval+json',
+           'storage_ref', 'probe'),
+         sealed_at         = now()
+   WHERE tenant_id  = '11111111-1111-4111-8111-111111111111'
+     AND artifact_id = 'PRD-001'
+     AND version     = 1
+     AND status NOT IN ('APPROVED','FROZEN','SUPERSEDED');
+
+  SELECT count(*) INTO sealed_count
+    FROM artifact_versions
+   WHERE tenant_id   = '11111111-1111-4111-8111-111111111111'
+     AND artifact_id = 'PRD-001'
+     AND version     = 1
+     AND status IN ('APPROVED','FROZEN','SUPERSEDED');
+
+  IF sealed_count = 0 THEN
+    RAISE EXCEPTION 'FAIL  the delete probe could not seal a version, so the trigger was never exercised';
+  END IF;
+
   BEGIN
     DELETE FROM artifact_versions
-     WHERE artifact_id = 'PRD-001' AND version = 1
-       AND status IN ('APPROVED','FROZEN','SUPERSEDED');
-    RAISE NOTICE 'NOTE  no sealed version present to delete in this run';
-  EXCEPTION WHEN check_violation THEN
-    RAISE NOTICE 'PASS  Immutability: the delete trigger refuses sealed versions even for the table owner';
+     WHERE tenant_id   = '11111111-1111-4111-8111-111111111111'
+       AND artifact_id = 'PRD-001'
+       AND version     = 1;
+    -- Reaching this line means a sealed version was deleted, which is the
+    -- failure this entire file exists to catch. It must stop the run.
+    RAISE EXCEPTION 'FAIL  Immutability: a sealed artifact version was DELETED by the table owner';
+  EXCEPTION
+    WHEN check_violation THEN
+      RAISE NOTICE 'PASS  Immutability: the delete trigger refuses sealed versions even for the table owner';
   END;
 END $$;
 
