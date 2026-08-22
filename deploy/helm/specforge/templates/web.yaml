@@ -1,0 +1,119 @@
+{{- if .Values.web.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "specforge.fullname" . }}-web
+  labels:
+    {{- include "specforge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  replicas: {{ .Values.web.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "specforge.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        {{- include "specforge.labels" . | nindent 8 }}
+        app.kubernetes.io/component: web
+    spec:
+      serviceAccountName: {{ include "specforge.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: web
+          image: {{ include "specforge.image" (dict "root" . "component" "specforge-web" "tag" .Values.web.tag) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 3000
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3000"
+            # The bind address. Deliberately distinct from the public URL below:
+            # confusing the two is what makes post-login redirects point at
+            # 0.0.0.0 and every sign-in appear to loop.
+            - name: HOSTNAME
+              value: "0.0.0.0"
+            - name: SPECFORGE_PUBLIC_URL
+              value: {{ .Values.web.publicUrl | quote }}
+            - name: SPECFORGE_API_URL
+              value: "http://{{ include "specforge.fullname" . }}-api:{{ .Values.api.service.port }}"
+            - name: SPECFORGE_ISSUER_URL
+              value: {{ .Values.auth.issuer | quote }}
+            - name: SPECFORGE_CLIENT_ID
+              value: {{ .Values.auth.clientId | quote }}
+            - name: SPECFORGE_REDIRECT_URL
+              value: "{{ .Values.web.publicUrl }}/api/auth/callback"
+            - name: SPECFORGE_TENANT_CLAIM
+              value: {{ .Values.auth.tenantClaim | quote }}
+            - name: SPECFORGE_ROLES_CLAIM
+              value: {{ .Values.auth.rolesClaim | quote }}
+            {{- if .Values.auth.existingSecret }}
+            # The key that encrypts the session cookie. The console holds the
+            # access token on the server and gives the browser only this cookie,
+            # so this key is the credential that matters here.
+            - name: SPECFORGE_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.sessionSecretKey }}
+            - name: SPECFORGE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.clientSecretKey }}
+                  optional: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /login
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /login
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+          volumeMounts:
+            - name: cache
+              mountPath: /app/.next/cache
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: cache
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "specforge.fullname" . }}-web
+  labels:
+    {{- include "specforge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  type: {{ .Values.web.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.web.service.port }}
+      targetPort: http
+  selector:
+    {{- include "specforge.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+{{- end }}

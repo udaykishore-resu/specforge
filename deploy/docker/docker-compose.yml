@@ -1,0 +1,317 @@
+# SpecForge local development stack.
+#
+# This is a development environment, and it says so: the credentials below are
+# fixed, well-known and safe to commit precisely because nothing here is
+# reachable from outside the machine and no real data lives in it. Production
+# secrets come from the secret store described in
+# docs/architecture/11-security-architecture.md and never from a compose file.
+#
+#   make dev        start everything, migrate and seed
+#   make dev-down   stop, keeping data
+#   make dev-clean  stop and delete data
+
+name: specforge
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ------------------------------------------------------------ datastore ---
+  postgres:
+    image: postgres:16.4-alpine
+    container_name: specforge-postgres
+    command:
+      - postgres
+      # Logging every statement is impractical in production and invaluable
+      # locally: it is how you see the SET LOCAL app.tenant_id that row-level
+      # security depends on.
+      - -c
+      - log_statement=none
+      - -c
+      - log_min_duration_statement=500
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+    environment:
+      POSTGRES_USER: specforge
+      POSTGRES_PASSWORD: specforge
+      POSTGRES_DB: specforge
+      # Scram, not md5, even locally: the driver's SCRAM path should be the one
+      # that gets exercised every day.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U specforge -d specforge"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *logging
+
+  redis:
+    image: redis:7.4-alpine
+    container_name: specforge-redis
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    logging: *logging
+
+  # --------------------------------------------------------------- events ---
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    container_name: specforge-redpanda
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+      - --pandaproxy-addr=0.0.0.0:8082
+      - --advertise-pandaproxy-addr=redpanda:8082
+      - --check=false
+    ports:
+      - "9092:9092"
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    logging: *logging
+
+  # --------------------------------------------------------- object store ---
+  minio:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    container_name: specforge-minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: specforge
+      MINIO_ROOT_PASSWORD: specforge-dev-secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    logging: *logging
+
+  # minio-init creates the buckets with object lock enabled.
+  #
+  # Object lock is the point. Evidence and audit anchors are written once and
+  # must survive an attacker who reaches the credentials, so the retention is
+  # set on the bucket rather than trusted to application code.
+  minio-init:
+    image: minio/mc:RELEASE.2024-10-08T09-37-26Z
+    container_name: specforge-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 specforge specforge-dev-secret &&
+      mc mb --ignore-existing local/sf-content &&
+      mc mb --ignore-existing --with-lock local/sf-evidence &&
+      mc mb --ignore-existing --with-lock local/sf-audit &&
+      mc retention set --default GOVERNANCE 7d local/sf-evidence &&
+      mc retention set --default GOVERNANCE 7d local/sf-audit &&
+      echo 'buckets ready'
+      "
+    logging: *logging
+
+  # -------------------------------------------------------- observability ---
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    container_name: specforge-otel
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./observability/otel-collector.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      - jaeger
+    logging: *logging
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    container_name: specforge-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+    logging: *logging
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: specforge-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=6h
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9091:9090"
+    logging: *logging
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    container_name: specforge-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+    logging: *logging
+
+  # ------------------------------------------------------------- platform ---
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.api
+      args:
+        VERSION: dev
+    container_name: specforge-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      SF_ENV: development
+      SF_SERVICE_NAME: specforge-api
+      SF_HTTP_ADDR: ":8080"
+      SF_HTTP_PUBLIC_BASE_URL: "http://localhost:8080"
+      SF_HTTP_ALLOWED_ORIGINS: "http://localhost:3000"
+      SF_DB_DSN: "host=postgres port=5432 user=specforge password=specforge dbname=specforge sslmode=disable"
+      SF_CACHE_PROVIDER: redis
+      SF_CACHE_ADDR: "redis:6379"
+      SF_OBJSTORE_PROVIDER: s3
+      SF_OBJSTORE_ENDPOINT: "http://minio:9000"
+      SF_OBJSTORE_REGION: us-east-1
+      SF_OBJSTORE_CONTENT_BUCKET: sf-content
+      SF_OBJSTORE_EVIDENCE_BUCKET: sf-evidence
+      SF_OBJSTORE_ACCESS_KEY: specforge
+      SF_OBJSTORE_SECRET_KEY: specforge-dev-secret
+      SF_OBJSTORE_OBJECT_LOCK: "true"
+      SF_EVENTS_PROVIDER: kafka
+      SF_EVENTS_BROKERS: "redpanda:9092"
+      SF_EVENTS_TOPIC_PREFIX: specforge
+      # The development identity provider is a real OIDC provider with PKCE,
+      # single-use codes and asymmetric signing. It refuses to start in
+      # production, and the configuration validator refuses production with it
+      # enabled — two independent guards, because "we shipped the dev IdP" is a
+      # mistake nobody makes twice but everybody makes once.
+      SF_AUTH_DEV_IDP: "true"
+      SF_AUTH_DEV_IDP_ADDR: ":8081"
+      SF_AUTH_ISSUER: "http://localhost:8081"
+      SF_AUTH_REDIRECT_URL: "http://localhost:3000/api/auth/callback"
+      SF_OTEL_ENDPOINT: "http://otel-collector:4318"
+      SF_OTEL_SAMPLE_RATIO: "1.0"
+      SF_LOG_LEVEL: info
+      SF_LOG_FORMAT: json
+      SF_METRICS_ADDR: ":9090"
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+      - "9090:9090"
+    restart: unless-stopped
+    logging: *logging
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.worker
+      args:
+        VERSION: dev
+    container_name: specforge-worker
+    command: ["--roles", "outbox,anchor,gc"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redpanda:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      SF_ENV: development
+      SF_SERVICE_NAME: specforge-worker
+      SF_DB_DSN: "host=postgres port=5432 user=specforge password=specforge dbname=specforge sslmode=disable"
+      SF_OBJSTORE_PROVIDER: s3
+      SF_OBJSTORE_ENDPOINT: "http://minio:9000"
+      SF_OBJSTORE_CONTENT_BUCKET: sf-content
+      SF_OBJSTORE_EVIDENCE_BUCKET: sf-evidence
+      SF_OBJSTORE_ACCESS_KEY: specforge
+      SF_OBJSTORE_SECRET_KEY: specforge-dev-secret
+      SF_EVENTS_PROVIDER: kafka
+      SF_EVENTS_BROKERS: "redpanda:9092"
+      SF_OTEL_ENDPOINT: "http://otel-collector:4318"
+      SF_LOG_FORMAT: json
+      SF_METRICS_ADDR: ":9090"
+    restart: unless-stopped
+    logging: *logging
+
+  web:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.web
+    container_name: specforge-web
+    depends_on:
+      - api
+    environment:
+      NODE_ENV: production
+      # The browser never sees a token. The Next.js server holds the session
+      # cookie and calls the API server-side, so an XSS on the page cannot
+      # exfiltrate credentials.
+      SPECFORGE_API_URL: "http://api:8080"
+      SPECFORGE_PUBLIC_API_URL: "http://localhost:8080"
+      SPECFORGE_ISSUER_URL: "http://localhost:8081"
+      SPECFORGE_CLIENT_ID: "specforge-web"
+      SPECFORGE_REDIRECT_URL: "http://localhost:3000/api/auth/callback"
+      # The origin a browser uses, which is not the address the container binds
+      # to. Without it, redirects after sign-in point at 0.0.0.0.
+      SPECFORGE_PUBLIC_URL: "http://localhost:3000"
+      # These must match the API's SF_AUTH_*_CLAIM settings.
+      SPECFORGE_TENANT_CLAIM: "https://specforge.io/tenant"
+      SPECFORGE_ROLES_CLAIM: "https://specforge.io/roles"
+      # Development-only session key. Production reads it from the secret store.
+      SPECFORGE_SESSION_SECRET: "development-only-session-key-change-me"
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  postgres-data:
+  minio-data:
+  grafana-data:

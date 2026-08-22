@@ -1,0 +1,334 @@
+# SpecForge continuous integration.
+#
+# The pipeline enforces the properties the platform claims about itself, not
+# just that the code compiles:
+#
+#   * the database invariants (row-level security, immutability, the audit
+#     trail's append-only trigger) are asserted against a real PostgreSQL
+#   * the published API document is checked against the router
+#   * every route is proved to declare a permission
+#   * the container images are built reproducibly and scanned
+#
+# Every job calls a Makefile target, so what CI runs is what a developer can
+# run. A check that exists only in a workflow file is a check nobody can
+# reproduce when it fails.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.24"
+  NODE_VERSION: "22"
+
+jobs:
+  build:
+    name: Build and static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so `git describe` can stamp a meaningful version into
+          # the binary. A build that cannot name its own commit cannot be
+          # correlated with a deployment record.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Formatting
+        run: make fmt-check
+
+      - name: Vet
+        run: make vet
+
+      - name: Dependency policy
+        run: make lint-deps
+
+      - name: Route authorization lint
+        run: make lint-routes
+
+      - name: Build
+        run: make build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: bin/
+          retention-days: 7
+
+  test:
+    name: Unit and contract tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Test
+        run: make cover
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.html
+          retention-days: 14
+
+  database:
+    name: Database invariants and integration
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16.4-alpine
+        env:
+          POSTGRES_USER: specforge
+          POSTGRES_PASSWORD: specforge
+          POSTGRES_DB: specforge_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U specforge"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      TEST_DSN: "host=127.0.0.1 port=5432 user=specforge password=specforge dbname=specforge_test sslmode=disable"
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Apply migrations
+        run: SF_DB_DSN="$TEST_DSN" go run ./cmd/specforge-migrate up
+
+      - name: Database invariants
+        # These are the platform's tenancy and immutability guarantees stated
+        # as SQL. If one of them stops holding, nothing above it in the stack
+        # is trustworthy, so this runs before the integration tests.
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          psql "$TEST_DSN" -v ON_ERROR_STOP=1 -f test/isolation/invariants.sql
+
+      - name: Integration journey
+        run: SF_TEST_DSN="$TEST_DSN" go test ./test/integration/... -count=1 -v
+
+  web:
+    name: Console
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        env:
+          # Placeholders. Every one of these is read again at request time; the
+          # build must not bake configuration into the image.
+          SPECFORGE_SESSION_SECRET: ci-placeholder-value-not-used-at-runtime
+          SPECFORGE_API_URL: http://localhost:8080
+          SPECFORGE_ISSUER_URL: http://localhost:8081
+          SPECFORGE_CLIENT_ID: specforge-web
+          SPECFORGE_REDIRECT_URL: http://localhost:3000/api/auth/callback
+        run: npm run build
+
+  manifests:
+    name: Chart and infrastructure
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+
+      - name: Helm lint
+        run: helm lint deploy/helm/specforge
+
+      - name: Render the chart
+        # Rendering with production values is what catches a template that only
+        # works with the defaults, and the chart's own preconditions refuse a
+        # configuration that would weaken a control.
+        run: |
+          helm template specforge deploy/helm/specforge \
+            --set environment=production \
+            --set web.publicUrl=https://app.example.com \
+            --set auth.issuer=https://idp.example.com \
+            --set objstore.evidenceBucket=example-evidence \
+            --set objstore.contentBucket=example-content \
+            --set database.existingSecret=example-db \
+            > /tmp/rendered.yaml
+          test -s /tmp/rendered.yaml
+
+      - name: Reject a chart that would disable object lock
+        # A negative test: the chart must refuse to render, not quietly comply.
+        run: |
+          if helm template specforge deploy/helm/specforge \
+              --set objstore.objectLock=false \
+              --set web.publicUrl=https://app.example.com \
+              --set auth.issuer=https://idp.example.com \
+              --set objstore.evidenceBucket=example-evidence \
+              --set database.existingSecret=example-db >/dev/null 2>&1; then
+            echo "The chart rendered with object lock disabled. It must refuse."
+            exit 1
+          fi
+          echo "Refused, as expected."
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - name: Terraform format
+        run: terraform fmt -check -recursive deploy/terraform
+
+      - name: Terraform validate
+        run: |
+          for dir in deploy/terraform/modules/*/; do
+            echo "==> $dir"
+            terraform -chdir="$dir" init -backend=false -input=false >/dev/null
+            terraform -chdir="$dir" validate
+          done
+
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy.sarif
+
+  images:
+    name: Container images
+    runs-on: ubuntu-latest
+    needs: [build, test, database, web]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      matrix:
+        component: [api, worker, web]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Version
+        id: version
+        run: |
+          echo "version=$(git describe --tags --always)" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "date=$(git log -1 --format=%cI)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.${{ matrix.component }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/specforge-${{ matrix.component }}:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/specforge-${{ matrix.component }}:sha-${{ steps.version.outputs.commit }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            COMMIT=${{ steps.version.outputs.commit }}
+            BUILD_DATE=${{ steps.version.outputs.date }}
+          provenance: true
+          sbom: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Attest the build
+        # The attestation is what lets a deployment gate check that the image
+        # it is about to run was produced by this pipeline from this commit,
+        # rather than pushed by someone with registry credentials.
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/specforge-${{ matrix.component }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Scan the image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/specforge-${{ matrix.component }}:${{ steps.version.outputs.version }}
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true

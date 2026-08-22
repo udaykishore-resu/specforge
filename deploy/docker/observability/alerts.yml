@@ -1,0 +1,153 @@
+# SpecForge alerting rules.
+#
+# These are the alerts that matter for a governance platform, and they are
+# deliberately not the usual CPU-and-memory set. The question each one answers
+# is "has a control stopped working?", because a platform whose audit trail has
+# quietly stopped chaining is more dangerous than one that is simply down: it
+# still looks correct.
+
+groups:
+  - name: specforge-governance
+    interval: 30s
+    rules:
+      - alert: AuditChainVerificationFailing
+        expr: sf_audit_chain_valid == 0
+        for: 1m
+        labels:
+          severity: critical
+          category: integrity
+        annotations:
+          summary: "The audit chain for tenant {{ $labels.tenant_id }} does not verify"
+          description: >-
+            Chain verification failed. Treat this as a suspected tampering
+            incident, not a bug: follow the integrity section of
+            docs/runbooks/operational-runbook.md, preserve the database and
+            object store before any remediation, and do not restart the
+            platform to 'clear' it.
+
+      - alert: AuditAnchoringStalled
+        expr: time() - sf_audit_last_anchor_timestamp_seconds > 7200
+        for: 10m
+        labels:
+          severity: warning
+          category: integrity
+        annotations:
+          summary: "No audit anchor published for over two hours"
+          description: >-
+            Anchoring is what makes the chain externally verifiable. While it is
+            stalled, a rewrite of history would leave no external reference to
+            contradict it.
+
+      - alert: OutboxBacklogGrowing
+        expr: sf_outbox_pending > 1000
+        for: 5m
+        labels:
+          severity: warning
+          category: delivery
+        annotations:
+          summary: "{{ $value }} events are awaiting publication"
+          description: >-
+            The outbox relay is behind or stopped. Domain events are still
+            durable in the database, so nothing is lost, but downstream
+            consumers are working from a stale view of the graph.
+
+      - alert: OutboxRelayStopped
+        expr: rate(sf_outbox_published_total[10m]) == 0 and sf_outbox_pending > 0
+        for: 10m
+        labels:
+          severity: critical
+          category: delivery
+        annotations:
+          summary: "The outbox relay has published nothing for ten minutes while work is pending"
+
+      - alert: ApprovalDeniedSpike
+        expr: rate(sf_http_errors_total{code="authz.four_eyes_violated"}[15m]) > 0.2
+        for: 10m
+        labels:
+          severity: warning
+          category: security
+        annotations:
+          summary: "Elevated approval denials"
+          description: >-
+            Sustained four-eyes refusals on approval. This is either a
+            misconfigured role assignment blocking legitimate work, or someone
+            probing the approval path. Both are worth looking at within the
+            hour.
+
+      - alert: StepUpFailureRate
+        expr: >-
+          rate(sf_http_errors_total{code="authz.step_up_required"}[15m])
+            / clamp_min(rate(sf_http_requests_total{route=~".*approve.*"}[15m]), 0.001) > 0.5
+        for: 15m
+        labels:
+          severity: warning
+          category: security
+        annotations:
+          summary: "Most approval attempts are failing step-up authentication"
+          description: >-
+            Either the step-up window is set too tight for how people actually
+            work, or the identity provider has stopped returning the second
+            factor in the amr claim. The second case silently disables a
+            control while appearing to enforce it.
+
+  - name: specforge-availability
+    interval: 30s
+    rules:
+      - alert: APIDown
+        expr: up{job="specforge-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          category: availability
+        annotations:
+          summary: "The SpecForge API is not being scraped"
+
+      - alert: HighErrorRate
+        expr: >-
+          sum(rate(sf_http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(sf_http_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          category: availability
+        annotations:
+          summary: "More than 5% of requests are returning 5xx"
+
+      - alert: ContentHashMismatch
+        expr: increase(sf_content_hash_mismatch_total[1h]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          category: integrity
+        annotations:
+          summary: "Stored content failed its own hash check"
+          description: >-
+            A read found content whose bytes do not match the recorded hash.
+            The read failed closed, which is correct, but the underlying storage
+            is either corrupt or has been modified. Do not repair the hash to
+            match the content.
+
+      - alert: DatabaseConnectionSaturation
+        expr: >-
+          sf_db_pool_connections{state="in_use"}
+            / clamp_min(sf_db_pool_connections{state="open"}, 1) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          category: capacity
+        annotations:
+          summary: "The database connection pool is above 90% utilization"
+
+      - alert: SlowApprovalPath
+        expr: >-
+          histogram_quantile(0.95,
+            sum(rate(sf_http_request_duration_seconds_bucket{route=~".*approve.*"}[10m])) by (le)) > 3
+        for: 10m
+        labels:
+          severity: warning
+          category: latency
+        annotations:
+          summary: "Approvals are taking more than three seconds at p95"
+          description: >-
+            The approval path writes to object storage before sealing. Sustained
+            slowness usually means the object store is degraded.

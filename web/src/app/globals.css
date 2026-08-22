@@ -1,0 +1,96 @@
+@import 'tailwindcss';
+
+/*
+ * SpecForge console theme.
+ *
+ * The palette is deliberately restrained. This is a governance tool: the only
+ * things that should draw the eye are state — approved, sealed, blocked,
+ * proposed — and the integrity signals. Everything else recedes.
+ */
+
+@theme {
+  --color-surface: oklch(100% 0 0);
+  --color-surface-raised: oklch(98.5% 0.002 250);
+  --color-surface-sunken: oklch(96.8% 0.004 250);
+  --color-border-subtle: oklch(91% 0.005 250);
+  --color-border-strong: oklch(83% 0.008 250);
+
+  --color-ink: oklch(21% 0.015 260);
+  --color-ink-muted: oklch(48% 0.012 260);
+  --color-ink-faint: oklch(62% 0.01 260);
+
+  --color-accent: oklch(52% 0.15 258);
+  --color-accent-soft: oklch(95% 0.025 258);
+
+  --color-sealed: oklch(48% 0.11 155);
+  --color-sealed-soft: oklch(95.5% 0.03 155);
+  --color-review: oklch(58% 0.13 75);
+  --color-review-soft: oklch(96% 0.04 75);
+  --color-danger: oklch(53% 0.19 25);
+  --color-danger-soft: oklch(95.5% 0.03 25);
+  --color-draft: oklch(55% 0.02 260);
+  --color-draft-soft: oklch(95.5% 0.004 260);
+
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-surface: oklch(17.5% 0.012 260);
+    --color-surface-raised: oklch(21% 0.014 260);
+    --color-surface-sunken: oklch(14.5% 0.012 260);
+    --color-border-subtle: oklch(27% 0.014 260);
+    --color-border-strong: oklch(35% 0.016 260);
+
+    --color-ink: oklch(94% 0.005 260);
+    --color-ink-muted: oklch(72% 0.01 260);
+    --color-ink-faint: oklch(58% 0.012 260);
+
+    --color-accent: oklch(72% 0.13 258);
+    --color-accent-soft: oklch(28% 0.05 258);
+
+    --color-sealed: oklch(74% 0.13 155);
+    --color-sealed-soft: oklch(26% 0.05 155);
+    --color-review: oklch(78% 0.13 75);
+    --color-review-soft: oklch(28% 0.05 75);
+    --color-danger: oklch(70% 0.16 25);
+    --color-danger-soft: oklch(27% 0.06 25);
+    --color-draft: oklch(70% 0.01 260);
+    --color-draft-soft: oklch(25% 0.008 260);
+  }
+}
+
+html {
+  color-scheme: light dark;
+}
+
+body {
+  background: var(--color-surface-sunken);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* A visible focus ring is a governance feature: approvals are keyboard-driven
+   for people who do dozens a day, and an invisible focus target is how the
+   wrong artifact gets approved. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+@layer components {
+  .sf-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: 0.75rem;
+  }
+
+  .sf-hash {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    letter-spacing: -0.01em;
+    color: var(--color-ink-muted);
+    word-break: break-all;
+  }
+}

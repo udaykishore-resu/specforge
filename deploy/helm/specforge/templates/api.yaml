@@ -1,0 +1,207 @@
+{{- include "specforge.validate" . -}}
+{{- if .Values.api.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "specforge.fullname" . }}-api
+  labels:
+    {{- include "specforge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  {{- if not .Values.api.autoscaling.enabled }}
+  replicas: {{ .Values.api.replicaCount }}
+  {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "specforge.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "specforge.labels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+      annotations:
+        # Roll the pods when configuration changes, so a settings change takes
+        # effect deliberately rather than at the next unrelated restart.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.extraAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "specforge.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.api.terminationGracePeriodSeconds }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      containers:
+        - name: api
+          image: {{ include "specforge.image" (dict "root" . "component" "specforge-api" "tag" .Values.api.tag) }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: metrics
+              containerPort: 9090
+          env:
+            {{- include "specforge.commonEnv" . | nindent 12 }}
+            - name: SF_SERVICE_NAME
+              value: specforge-api
+            - name: SF_HTTP_ADDR
+              value: ":8080"
+            - name: SF_AUTH_ISSUER
+              value: {{ .Values.auth.issuer | quote }}
+            - name: SF_AUTH_AUDIENCE
+              value: {{ .Values.auth.audience | quote }}
+            {{- if .Values.auth.jwksUrl }}
+            - name: SF_AUTH_JWKS_URL
+              value: {{ .Values.auth.jwksUrl | quote }}
+            {{- end }}
+            - name: SF_AUTH_TENANT_CLAIM
+              value: {{ .Values.auth.tenantClaim | quote }}
+            - name: SF_AUTH_ROLES_CLAIM
+              value: {{ .Values.auth.rolesClaim | quote }}
+            - name: SF_AUTH_CLIENT_ID
+              value: {{ .Values.auth.clientId | quote }}
+            - name: SF_AUTH_STEP_UP_MAX_AGE
+              value: {{ .Values.auth.stepUpMaxAge | quote }}
+            {{- if .Values.auth.existingSecret }}
+            - name: SF_AUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.clientSecretKey }}
+                  optional: true
+            {{- end }}
+            {{- if .Values.ingress.enabled }}
+            - name: SF_HTTP_PUBLIC_BASE_URL
+              value: "https://{{ .Values.ingress.apiHost }}"
+            - name: SF_HTTP_ALLOWED_ORIGINS
+              value: "https://{{ .Values.ingress.webHost }}"
+            {{- end }}
+          resources:
+            {{- toYaml .Values.api.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.api.livenessProbe.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.api.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.api.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.api.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.api.livenessProbe.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.api.readinessProbe.path }}
+              port: http
+            initialDelaySeconds: {{ .Values.api.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.api.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.api.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.api.readinessProbe.failureThreshold }}
+          lifecycle:
+            preStop:
+              exec:
+                # Let the load balancer stop sending new work before the process
+                # begins shutting down. Without this, requests in flight at the
+                # moment of termination are lost — and one of them may be an
+                # approval that has already written its evidence.
+                command: ["/bin/sh", "-c", "sleep 5"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # The root filesystem is read-only, so the process needs somewhere to
+        # write temporary files.
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "specforge.fullname" . }}-api
+  labels:
+    {{- include "specforge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  type: {{ .Values.api.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.api.service.port }}
+      targetPort: http
+    - name: metrics
+      port: {{ .Values.api.service.metricsPort }}
+      targetPort: metrics
+  selector:
+    {{- include "specforge.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+{{- if .Values.api.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "specforge.fullname" . }}-api
+  labels:
+    {{- include "specforge.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "specforge.fullname" . }}-api
+  minReplicas: {{ .Values.api.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.api.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.api.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleDown:
+      # Scale down slowly. The cost of an extra pod is trivial next to dropping
+      # capacity during a review window.
+      stabilizationWindowSeconds: 300
+{{- end }}
+{{- if .Values.api.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "specforge.fullname" . }}-api
+  labels:
+    {{- include "specforge.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.api.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "specforge.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+{{- end }}
+{{- end }}

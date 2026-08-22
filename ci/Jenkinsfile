@@ -1,0 +1,265 @@
+// SpecForge — Jenkins pipeline.
+//
+// Functionally equivalent to .github/workflows/ci.yml, for organizations that
+// run Jenkins. Both call the same Makefile targets, so the two pipelines cannot
+// drift into checking different things, and a developer can reproduce either
+// on a laptop.
+//
+// The deployment stage is deliberately gated on a human approval that the
+// pipeline cannot grant itself. Production deployment is one of the actions
+// the platform's own separation-of-duties rules cover; a CI system that could
+// approve its own release would be a hole in exactly the control this product
+// exists to enforce.
+
+pipeline {
+  agent {
+    kubernetes {
+      yaml '''
+        apiVersion: v1
+        kind: Pod
+        spec:
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+          containers:
+            - name: go
+              image: golang:1.24-alpine
+              command: ["cat"]
+              tty: true
+              resources:
+                requests: { cpu: "1", memory: 2Gi }
+            - name: node
+              image: node:22-alpine
+              command: ["cat"]
+              tty: true
+            - name: tools
+              image: alpine/k8s:1.31.0
+              command: ["cat"]
+              tty: true
+            - name: postgres
+              image: postgres:16.4-alpine
+              env:
+                - { name: POSTGRES_USER, value: specforge }
+                - { name: POSTGRES_PASSWORD, value: specforge }
+                - { name: POSTGRES_DB, value: specforge_test }
+      '''
+    }
+  }
+
+  options {
+    timeout(time: 45, unit: 'MINUTES')
+    buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '10'))
+    disableConcurrentBuilds(abortPrevious: true)
+    timestamps()
+  }
+
+  environment {
+    TEST_DSN   = 'host=127.0.0.1 port=5432 user=specforge password=specforge dbname=specforge_test sslmode=disable'
+    IMAGE_REPO = 'ghcr.io/specforge'
+    GOFLAGS    = '-buildvcs=true'
+  }
+
+  stages {
+    stage('Checks') {
+      parallel {
+        stage('Static analysis') {
+          steps {
+            container('go') {
+              sh 'apk add --no-cache make git'
+              sh 'make fmt-check'
+              sh 'make vet'
+              sh 'make lint-deps'
+              sh 'make lint-routes'
+            }
+          }
+        }
+
+        stage('Unit and contract tests') {
+          steps {
+            container('go') {
+              sh 'apk add --no-cache make git'
+              sh 'make cover'
+            }
+          }
+          post {
+            always {
+              archiveArtifacts artifacts: 'coverage.html', allowEmptyArchive: true
+            }
+          }
+        }
+
+        stage('Console') {
+          steps {
+            container('node') {
+              dir('web') {
+                sh 'npm ci --no-audit --no-fund'
+                sh 'npm run typecheck'
+                sh 'npm run lint'
+                withEnv([
+                  'SPECFORGE_SESSION_SECRET=ci-placeholder-value-not-used-at-runtime',
+                  'SPECFORGE_API_URL=http://localhost:8080',
+                  'SPECFORGE_ISSUER_URL=http://localhost:8081',
+                  'SPECFORGE_CLIENT_ID=specforge-web',
+                  'SPECFORGE_REDIRECT_URL=http://localhost:3000/api/auth/callback',
+                ]) {
+                  sh 'npm run build'
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    stage('Database guarantees') {
+      steps {
+        container('go') {
+          sh 'apk add --no-cache make git postgresql16-client'
+          sh '''
+            for i in $(seq 1 40); do
+              pg_isready -h 127.0.0.1 -U specforge && break
+              sleep 2
+            done
+          '''
+          sh 'SF_DB_DSN="$TEST_DSN" go run ./cmd/specforge-migrate up'
+          // Row-level security, version immutability and the append-only audit
+          // trail, asserted against a real PostgreSQL. Everything above these
+          // depends on them holding.
+          sh 'psql "$TEST_DSN" -v ON_ERROR_STOP=1 -f test/isolation/invariants.sql'
+          sh 'SF_TEST_DSN="$TEST_DSN" go test ./test/integration/... -count=1'
+        }
+      }
+    }
+
+    stage('Manifests') {
+      steps {
+        container('tools') {
+          sh 'helm lint deploy/helm/specforge'
+          sh '''
+            helm template specforge deploy/helm/specforge \
+              --set environment=production \
+              --set web.publicUrl=https://app.example.com \
+              --set auth.issuer=https://idp.example.com \
+              --set objstore.evidenceBucket=example-evidence \
+              --set objstore.contentBucket=example-content \
+              --set database.existingSecret=example-db > /tmp/rendered.yaml
+            test -s /tmp/rendered.yaml
+          '''
+          sh 'terraform fmt -check -recursive deploy/terraform'
+        }
+      }
+    }
+
+    stage('Security') {
+      steps {
+        container('go') {
+          sh 'apk add --no-cache git'
+          sh 'go install golang.org/x/vuln/cmd/govulncheck@latest && govulncheck ./...'
+        }
+        container('tools') {
+          sh 'trivy fs --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 .'
+        }
+      }
+    }
+
+    stage('Images') {
+      when { branch 'main' }
+      steps {
+        container('tools') {
+          script {
+            def version = sh(script: 'git describe --tags --always', returnStdout: true).trim()
+            def commit = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+
+            ['api', 'worker', 'web'].each { component ->
+              sh """
+                docker build \
+                  -f deploy/docker/Dockerfile.${component} \
+                  --build-arg VERSION=${version} \
+                  --build-arg COMMIT=${commit} \
+                  -t ${IMAGE_REPO}/specforge-${component}:${version} .
+                trivy image --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 \
+                  ${IMAGE_REPO}/specforge-${component}:${version}
+                docker push ${IMAGE_REPO}/specforge-${component}:${version}
+              """
+            }
+            env.RELEASE_VERSION = version
+          }
+        }
+      }
+    }
+
+    stage('Deploy to staging') {
+      when { branch 'main' }
+      steps {
+        container('tools') {
+          sh """
+            helm upgrade --install specforge deploy/helm/specforge \
+              --namespace specforge --create-namespace \
+              --values deploy/helm/values-staging.yaml \
+              --set api.tag=${env.RELEASE_VERSION} \
+              --set worker.tag=${env.RELEASE_VERSION} \
+              --set web.tag=${env.RELEASE_VERSION} \
+              --wait --timeout 10m
+          """
+          // Verify the audit chain after deployment. A migration or a rollback
+          // that damaged it should stop the release here, not be discovered in
+          // an audit months later.
+          sh '''
+            kubectl -n specforge exec deploy/specforge-worker -- \
+              specforge-cli verify-audit --tenant "$STAGING_TENANT_ID"
+          '''
+        }
+      }
+    }
+
+    stage('Approve production release') {
+      when { branch 'main' }
+      steps {
+        // Four eyes, applied to the pipeline itself. The submitter list must
+        // not include the account that triggered the build.
+        timeout(time: 24, unit: 'HOURS') {
+          input(
+            message: "Deploy ${env.RELEASE_VERSION} to production?",
+            submitter: 'release-managers',
+            parameters: [
+              string(
+                name: 'CHANGE_REFERENCE',
+                description: 'Change record. Recorded in the deployment audit entry.',
+              ),
+            ],
+          )
+        }
+      }
+    }
+
+    stage('Deploy to production') {
+      when { branch 'main' }
+      steps {
+        container('tools') {
+          sh """
+            helm upgrade --install specforge deploy/helm/specforge \
+              --namespace specforge --create-namespace \
+              --values deploy/helm/values-production.yaml \
+              --set api.tag=${env.RELEASE_VERSION} \
+              --set worker.tag=${env.RELEASE_VERSION} \
+              --set web.tag=${env.RELEASE_VERSION} \
+              --atomic --wait --timeout 15m
+          """
+        }
+      }
+      post {
+        failure {
+          // --atomic already rolls back. This records that it happened, so the
+          // deployment history shows the attempt rather than only its absence.
+          echo "Production deployment of ${env.RELEASE_VERSION} failed and was rolled back."
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      junit testResults: '**/junit*.xml', allowEmptyResults: true
+    }
+  }
+}

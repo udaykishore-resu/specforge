@@ -1,0 +1,13 @@
+# Copy to prod.tfvars and pin the addon versions your cluster has been tested
+# against. There is no default: an unpinned addon upgrades on its own schedule,
+# which makes a cluster's behaviour change without a corresponding change in
+# this repository.
+
+region = "eu-west-1"
+
+addon_versions = {
+  vpc_cni    = "v1.18.3-eksbuild.2"
+  coredns    = "v1.11.3-eksbuild.1"
+  kube_proxy = "v1.31.0-eksbuild.2"
+  ebs_csi    = "v1.35.0-eksbuild.1"
+}

@@ -1,0 +1,33 @@
+# Consistent formatting across editors.
+# Go's own tooling owns .go files; everything else is settled here so that a
+# diff shows a change in intent rather than a change of editor.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.go]
+indent_style = tab
+indent_size = 4
+
+[Makefile]
+indent_style = tab
+
+[*.{md,markdown}]
+# Two trailing spaces are a line break in Markdown.
+trim_trailing_whitespace = false
+
+[*.{yml,yaml}]
+indent_size = 2
+
+[*.{tf,tfvars}]
+indent_size = 2
+
+[*.sql]
+indent_size = 2

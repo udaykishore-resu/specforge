@@ -1,0 +1,71 @@
+# SpecForge API image.
+#
+# Three properties are deliberate:
+#
+#   * Reproducible. -trimpath plus pinned build metadata means the same source
+#     produces the same binary, which is what makes a provenance attestation
+#     worth attaching.
+#   * Distroless and non-root. The runtime stage has no shell, no package
+#     manager and no writable filesystem, so an RCE lands somewhere with almost
+#     nothing to work with.
+#   * No secrets. Nothing is baked in; configuration arrives as environment
+#     variables and mounted files at run time.
+
+# ---------------------------------------------------------------- build -----
+FROM golang:1.24-alpine AS build
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+
+WORKDIR /src
+
+# The platform has no third-party Go dependencies, so there is no module
+# download step and nothing to fetch from a proxy at build time. That is also
+# why there is no vendor directory to copy.
+COPY go.mod ./
+COPY cmd ./cmd
+COPY internal ./internal
+COPY tools ./tools
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath \
+      -ldflags "-s -w \
+        -X github.com/specforge/specforge/internal/platform/buildinfo.Version=${VERSION} \
+        -X github.com/specforge/specforge/internal/platform/buildinfo.Commit=${COMMIT} \
+        -X github.com/specforge/specforge/internal/platform/buildinfo.Date=${BUILD_DATE}" \
+      -o /out/specforge-api ./cmd/specforge-api
+
+# Migrations ship with the image so a deployment can never run against a schema
+# it was not built for.
+COPY migrations /out/migrations
+COPY api/openapi /out/openapi
+
+# --------------------------------------------------------------- runtime ----
+FROM gcr.io/distroless/static-debian12:nonroot
+
+LABEL org.opencontainers.image.title="specforge-api" \
+      org.opencontainers.image.description="SpecForge control plane API" \
+      org.opencontainers.image.source="https://github.com/specforge/specforge" \
+      org.opencontainers.image.licenses="Proprietary"
+
+COPY --from=build /out/specforge-api /usr/local/bin/specforge-api
+COPY --from=build /out/migrations /app/migrations
+COPY --from=build /out/openapi /app/openapi
+
+USER nonroot:nonroot
+WORKDIR /app
+
+ENV SF_DB_MIGRATIONS_DIR=/app/migrations \
+    SF_HTTP_ADDR=:8080 \
+    SF_METRICS_ADDR=:9090
+
+EXPOSE 8080 9090
+
+# The image has no shell, so a HEALTHCHECK would need a helper binary. Liveness
+# and readiness are Kubernetes' job here, against /healthz and /readyz, which
+# is where the probes belong anyway.
+
+ENTRYPOINT ["/usr/local/bin/specforge-api"]

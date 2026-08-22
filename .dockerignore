@@ -1,0 +1,12 @@
+.git
+.github
+bin/
+docs/
+test/
+web/node_modules
+web/.next
+deploy/terraform
+*.md
+!README.md
+coverage.*
+.data/

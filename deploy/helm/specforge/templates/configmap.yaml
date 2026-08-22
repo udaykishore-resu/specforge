@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "specforge.fullname" . }}-config
+  labels:
+    {{- include "specforge.labels" . | nindent 4 }}
+data:
+  # Non-secret configuration, kept here so that a change to it rolls the
+  # Deployments through the checksum annotation rather than taking effect at
+  # some later, unrelated restart.
+  environment: {{ .Values.environment | quote }}
+  log-level: {{ .Values.observability.logLevel | quote }}
+  four-eyes: {{ .Values.governance.fourEyes | quote }}
+  step-up-max-age: {{ .Values.auth.stepUpMaxAge | quote }}
+  object-lock: {{ .Values.objstore.objectLock | quote }}

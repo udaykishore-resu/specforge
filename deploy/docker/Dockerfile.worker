@@ -1,0 +1,63 @@
+# SpecForge worker image.
+#
+# The worker runs the outbox relay, audit anchoring and expiry sweeps. It is
+# built from the same source tree and the same base as the API so that a
+# vulnerability fix in the base image reaches both by rebuilding, not by
+# remembering.
+
+FROM golang:1.24-alpine AS build
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+
+WORKDIR /src
+
+COPY go.mod ./
+COPY cmd ./cmd
+COPY internal ./internal
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath \
+      -ldflags "-s -w \
+        -X github.com/specforge/specforge/internal/platform/buildinfo.Version=${VERSION} \
+        -X github.com/specforge/specforge/internal/platform/buildinfo.Commit=${COMMIT} \
+        -X github.com/specforge/specforge/internal/platform/buildinfo.Date=${BUILD_DATE}" \
+      -o /out/specforge-worker ./cmd/specforge-worker
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags "-s -w" \
+      -o /out/specforge-cli ./cmd/specforge-cli
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags "-s -w" \
+      -o /out/specforge-migrate ./cmd/specforge-migrate
+
+COPY migrations /out/migrations
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+LABEL org.opencontainers.image.title="specforge-worker" \
+      org.opencontainers.image.description="SpecForge outbox relay, audit anchoring and maintenance" \
+      org.opencontainers.image.source="https://github.com/specforge/specforge" \
+      org.opencontainers.image.licenses="Proprietary"
+
+COPY --from=build /out/specforge-worker /usr/local/bin/specforge-worker
+# The CLI travels with the worker so that an operator can run verify-audit in
+# the same network and identity context as the platform, without a bespoke
+# debug image built under incident pressure.
+COPY --from=build /out/specforge-cli /usr/local/bin/specforge-cli
+COPY --from=build /out/specforge-migrate /usr/local/bin/specforge-migrate
+COPY --from=build /out/migrations /app/migrations
+
+USER nonroot:nonroot
+WORKDIR /app
+
+ENV SF_DB_MIGRATIONS_DIR=/app/migrations \
+    SF_METRICS_ADDR=:9090
+
+EXPOSE 9090
+
+ENTRYPOINT ["/usr/local/bin/specforge-worker"]

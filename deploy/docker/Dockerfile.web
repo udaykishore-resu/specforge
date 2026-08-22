@@ -1,0 +1,77 @@
+# SpecForge console image.
+#
+# Built on Next.js standalone output, which produces a self-contained server
+# with only the modules it actually imports. The runtime stage carries no
+# package manager, no build toolchain and no source, and runs as a non-root
+# user.
+#
+# The console holds the session and calls the platform API server-side, so this
+# container is a confidential client: it needs its session key and, where the
+# identity provider requires one, its client secret. Both arrive as environment
+# variables at run time. Neither is ever baked into the image.
+
+# ---------------------------------------------------------------- deps ------
+FROM node:22-alpine AS deps
+
+WORKDIR /app
+COPY web/package.json web/package-lock.json* ./
+# `npm ci` when a lockfile is present, so the image is reproducible; fall back
+# to `npm install` only for a checkout that has not committed one yet.
+RUN if [ -f package-lock.json ]; then npm ci --omit=dev --no-audit --no-fund; \
+    else npm install --omit=dev --no-audit --no-fund; fi
+
+# --------------------------------------------------------------- build ------
+FROM node:22-alpine AS build
+
+WORKDIR /app
+COPY web/package.json web/package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; \
+    else npm install --no-audit --no-fund; fi
+
+COPY web/ ./
+
+# The build must not depend on runtime configuration. These placeholders exist
+# only to satisfy module-load-time checks; every one of them is read again from
+# the environment at request time.
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    SPECFORGE_SESSION_SECRET=build-time-placeholder-not-used-at-runtime \
+    SPECFORGE_API_URL=http://localhost:8080 \
+    SPECFORGE_ISSUER_URL=http://localhost:8081 \
+    SPECFORGE_CLIENT_ID=specforge-web \
+    SPECFORGE_REDIRECT_URL=http://localhost:3000/api/auth/callback
+
+RUN npm run build
+
+# ------------------------------------------------------------- runtime ------
+FROM node:22-alpine AS runtime
+
+LABEL org.opencontainers.image.title="specforge-web" \
+      org.opencontainers.image.description="SpecForge console" \
+      org.opencontainers.image.source="https://github.com/specforge/specforge" \
+      org.opencontainers.image.licenses="Proprietary"
+
+WORKDIR /app
+
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=3000 \
+    HOSTNAME=0.0.0.0
+
+# The standalone bundle, plus the static assets and public files it serves.
+COPY --from=build --chown=node:node /app/.next/standalone ./
+COPY --from=build --chown=node:node /app/.next/static ./.next/static
+COPY --from=build --chown=node:node /app/public ./public
+
+USER node
+
+EXPOSE 3000
+
+# HOSTNAME above is the bind address, which in a container is not the address a
+# browser uses. SPECFORGE_PUBLIC_URL must be set to the externally reachable
+# origin, or post-authentication redirects will point at 0.0.0.0 and every
+# sign-in will appear to loop back to the login page.
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+CMD ["node", "server.js"]
