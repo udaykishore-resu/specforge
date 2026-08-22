@@ -49,6 +49,18 @@ Sign in as any of the twelve seeded roles. Start as **Analyst** to see a draft
 move through review, then as **Owner** to approve it — the platform will refuse
 to let the same person do both.
 
+To check that all six are actually working, and that the guarantees behind them
+hold:
+
+```bash
+make smoke
+```
+
+It walks a real sign-in, calls the API as four different roles, confirms the
+refusals are refusals, verifies the audit chain, and checks that traces and
+metrics arrived. [docs/testing-the-local-stack.md](docs/testing-the-local-stack.md)
+explains each check and how to run it by hand.
+
 ## Verify it yourself
 
 The platform is built so that its claims can be checked without trusting it.
@@ -234,6 +246,9 @@ Then [`03-state-machines.md`](docs/architecture/03-state-machines.md),
 [`06-synchronization-strategy.md`](docs/architecture/06-synchronization-strategy.md),
 the [threat model](docs/architecture/21-threat-model.md), and the
 [operational runbook](docs/runbooks/operational-runbook.md).
+
+For working with a running stack:
+[testing the local stack](docs/testing-the-local-stack.md).
 
 ## Where the AI sits
 

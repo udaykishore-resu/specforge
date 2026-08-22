@@ -52,6 +52,8 @@ Commands:
                   Verify an exported evidence document offline.
   seed            --tenant-slug <slug>
                   Create a demo tenant, project and artifact graph.
+  tenant-id       --slug <slug>
+                  Print a tenant's identifier and nothing else.
   outbox-status
                   Report events awaiting publication.
   routes
@@ -69,6 +71,8 @@ func dispatch(command string, args []string) error {
 		return verifyEvidence(args)
 	case "seed":
 		return seed(args)
+	case "tenant-id":
+		return tenantID(args)
 	case "outbox-status":
 		return outboxStatus(args)
 	case "routes":

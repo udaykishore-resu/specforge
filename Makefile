@@ -151,6 +151,14 @@ dev: ## Start the full local stack, migrate and seed
 	@$(COMPOSE) exec -T postgres bash -c 'until pg_isready -U specforge -q; do sleep 1; done'
 	$(MAKE) migrate
 	$(MAKE) seed
+	@# The development identity provider must issue tokens scoped to the tenant
+	@# the seeder just created, and it reads that from its environment at
+	@# startup. Wiring it here rather than telling the developer to export it
+	@# removes the one step that, if skipped, makes everything else look broken.
+	@tenant=$$($(MAKE) -s tenant-id); \
+		echo "SF_DEV_TENANT_ID=$$tenant" > deploy/docker/.env; \
+		echo "wiring the development identity provider to tenant $$tenant"
+	$(COMPOSE) up -d api
 	@echo
 	@echo "  API        http://localhost:8080"
 	@echo "  Web        http://localhost:3000"
@@ -158,6 +166,20 @@ dev: ## Start the full local stack, migrate and seed
 	@echo "  Grafana    http://localhost:3001"
 	@echo "  Jaeger     http://localhost:16686"
 	@echo "  MinIO      http://localhost:9001"
+	@echo
+	@echo "  Check all of it:  make smoke"
+
+.PHONY: smoke
+smoke: ## Verify a running local stack end to end
+	@./scripts/smoke.sh
+
+.PHONY: token
+token: ## Print a development access token (ROLE=analyst)
+	@./scripts/dev-token.sh $(or $(ROLE),owner)
+
+.PHONY: tenant-id
+tenant-id: ## Print the demo tenant's id (SLUG=acme)
+	@SF_DB_DSN="$(DEV_DSN)" go run ./cmd/specforge-cli tenant-id --slug $(or $(SLUG),acme)
 
 .PHONY: dev-down
 dev-down: ## Stop the local stack, keeping volumes
