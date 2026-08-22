@@ -51,13 +51,48 @@ function issuerUrl(): string {
   return issuer.replace(/\/$/, '')
 }
 
+/**
+ * The address this process uses to reach the provider, which is not always the
+ * address a browser uses.
+ *
+ * In a container, `http://localhost:8081` is this container — so a server-side
+ * fetch of the discovery document resolves to the console itself and fails,
+ * while the same URL in the browser's address bar is correct. Two URLs are
+ * needed because two different clients follow them.
+ *
+ * SPECFORGE_ISSUER_URL stays the provider's *identity*: it is what the
+ * discovery document must declare, and what the browser is sent to. This is
+ * only the transport.
+ */
+function internalIssuerUrl(): string {
+  const internal = process.env.SPECFORGE_ISSUER_INTERNAL_URL
+  if (!internal) return issuerUrl()
+  return internal.replace(/\/$/, '')
+}
+
+/**
+ * Rewrites a back-channel endpoint from the discovery document onto the
+ * internal address.
+ *
+ * Applied only to endpoints this process fetches — the token, JWKS and
+ * userinfo endpoints. The authorization and end-session endpoints are followed
+ * by the browser and must keep the public address, so they are deliberately
+ * left alone.
+ */
+function backChannel(endpoint: string): string {
+  const pub = issuerUrl()
+  const internal = internalIssuerUrl()
+  if (pub === internal) return endpoint
+  return endpoint.startsWith(pub) ? internal + endpoint.slice(pub.length) : endpoint
+}
+
 export async function discover(): Promise<Discovery> {
   // Ten minutes is short enough to pick up an issuer rotation without a
   // redeploy and long enough that the discovery endpoint is not in the hot path
   // of every sign-in.
   if (cached && Date.now() - cached.at < 600_000) return cached.doc
 
-  const res = await fetch(`${issuerUrl()}/.well-known/openid-configuration`, {
+  const res = await fetch(`${internalIssuerUrl()}/.well-known/openid-configuration`, {
     cache: 'no-store',
   })
   if (!res.ok) {
@@ -65,6 +100,8 @@ export async function discover(): Promise<Discovery> {
   }
   const doc = (await res.json()) as Discovery
 
+  // Validated against the public issuer, not the internal one: the identity
+  // the provider claims must be the identity the browser will be sent to.
   if (doc.issuer.replace(/\/$/, '') !== issuerUrl()) {
     // A discovery document that names a different issuer is either
     // misconfiguration or redirection to an attacker's provider. Neither is
@@ -164,7 +201,9 @@ export async function exchangeCode(code: string, verifier: string): Promise<Toke
       'Basic ' + Buffer.from(`${encodeURIComponent(clientId())}:${encodeURIComponent(secret)}`).toString('base64')
   }
 
-  const res = await fetch(doc.token_endpoint, { method: 'POST', headers, body, cache: 'no-store' })
+  const res = await fetch(backChannel(doc.token_endpoint), {
+    method: 'POST', headers, body, cache: 'no-store',
+  })
   if (!res.ok) {
     const detail = await res.text()
     throw new Error(`token exchange failed with status ${res.status}: ${detail.slice(0, 200)}`)

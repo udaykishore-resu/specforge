@@ -26,6 +26,12 @@ LDFLAGS     := -s -w \
 DEV_DSN     ?= host=127.0.0.1 port=5432 user=specforge password=specforge dbname=specforge sslmode=disable
 TEST_DSN    ?= host=127.0.0.1 port=5432 user=specforge password=specforge dbname=specforge_test sslmode=disable
 
+# The object store these targets use MUST match what the compose stack gives the
+# API, or the seeder writes evidence to one store and the API reads from
+# another — which looks exactly like a seeder that silently did nothing.
+DEV_OBJSTORE ?= db
+DEV_ENV      := SF_DB_DSN="$(DEV_DSN)" SF_OBJSTORE_PROVIDER="$(DEV_OBJSTORE)"
+
 COMPOSE     := docker compose -f deploy/docker/docker-compose.yml
 IMAGE_REPO  ?= ghcr.io/specforge
 
@@ -124,25 +130,25 @@ test-all: test test-integration test-isolation ## Every test, including the data
 
 .PHONY: migrate
 migrate: ## Apply migrations to the development database
-	SF_DB_DSN="$(DEV_DSN)" go run ./cmd/specforge-migrate up
+	$(DEV_ENV) go run ./cmd/specforge-migrate up
 
 .PHONY: migrate-status
 migrate-status: ## Show which migrations have been applied
-	SF_DB_DSN="$(DEV_DSN)" go run ./cmd/specforge-migrate status
+	$(DEV_ENV) go run ./cmd/specforge-migrate status
 
 .PHONY: seed
 seed: ## Create the demo tenant, project and traceable artifact graph
-	SF_DB_DSN="$(DEV_DSN)" go run ./cmd/specforge-cli seed
+	$(DEV_ENV) go run ./cmd/specforge-cli seed
 
 # --------------------------------------------------------------- Run --------
 
 .PHONY: run-api
 run-api: ## Run the API against the development stack
-	SF_DB_DSN="$(DEV_DSN)" SF_AUTH_DEV_IDP=true go run ./cmd/specforge-api
+	$(DEV_ENV) SF_AUTH_DEV_IDP=true go run ./cmd/specforge-api
 
 .PHONY: run-worker
 run-worker: ## Run the worker against the development stack
-	SF_DB_DSN="$(DEV_DSN)" go run ./cmd/specforge-worker
+	$(DEV_ENV) go run ./cmd/specforge-worker
 
 .PHONY: dev
 dev: ## Start the full local stack, migrate and seed
@@ -179,7 +185,7 @@ token: ## Print a development access token (ROLE=analyst)
 
 .PHONY: tenant-id
 tenant-id: ## Print the demo tenant's id (SLUG=acme)
-	@SF_DB_DSN="$(DEV_DSN)" go run ./cmd/specforge-cli tenant-id --slug $(or $(SLUG),acme)
+	@$(DEV_ENV) go run ./cmd/specforge-cli tenant-id --slug $(or $(SLUG),acme)
 
 .PHONY: dev-down
 dev-down: ## Stop the local stack, keeping volumes
@@ -206,7 +212,7 @@ docker-build: ## Build the container images
 .PHONY: verify-audit
 verify-audit: ## Recompute a tenant's audit chain (TENANT=<uuid>)
 	@test -n "$(TENANT)" || (echo "usage: make verify-audit TENANT=<uuid>"; exit 1)
-	SF_DB_DSN="$(DEV_DSN)" go run ./cmd/specforge-cli verify-audit --tenant $(TENANT)
+	$(DEV_ENV) go run ./cmd/specforge-cli verify-audit --tenant $(TENANT)
 
 .PHONY: openapi
 openapi: ## Check the OpenAPI document against the router

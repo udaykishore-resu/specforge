@@ -251,7 +251,14 @@ services:
       # exfiltrate credentials.
       SPECFORGE_API_URL: "http://api:8080"
       SPECFORGE_PUBLIC_API_URL: "http://localhost:8080"
+      # The identity the browser is sent to, and the identity the discovery
+      # document must declare.
       SPECFORGE_ISSUER_URL: "http://localhost:8081"
+      # The address this container uses to reach it. Inside the web container
+      # localhost is the web container, so the back-channel fetches — discovery
+      # and the token exchange — need the service name. Without this, sign-in
+      # fails with "fetch failed" and nothing says why.
+      SPECFORGE_ISSUER_INTERNAL_URL: "http://api:8081"
       SPECFORGE_CLIENT_ID: "specforge-web"
       SPECFORGE_REDIRECT_URL: "http://localhost:3000/api/auth/callback"
       # The origin a browser uses, which is not the address the container binds
