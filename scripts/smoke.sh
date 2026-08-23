@@ -419,11 +419,18 @@ fi
 
 TARGETS="$(body "$PROM/api/v1/targets?state=active")"
 if printf '%s' "$TARGETS" | grep -q '"health":"up"'; then
-	DOWN="$(printf '%s' "$TARGETS" | grep -o '"health":"down"' | wc -l | tr -d ' ')"
-	if [ "${DOWN:-0}" -eq 0 ]; then
+	# Name the target and quote its error. "1 target down" sends the reader to a
+	# web UI to learn something this already knows.
+	DOWN="$(printf '%s' "$TARGETS" |
+		sed 's/{"discoveredLabels"/\n&/g' |
+		grep '"health":"down"' |
+		sed -n 's/.*"scrapePool":"\([^"]*\)".*"lastError":"\(.*\)","lastScrape".*/\1 — \2/p' |
+		cut -c1-200)"
+	if [ -z "$DOWN" ]; then
 		ok "every Prometheus target is up"
 	else
-		no "every Prometheus target is up" "$DOWN target(s) down — see $PROM/targets"
+		no "every Prometheus target is up" "$(printf '%s' "$DOWN" | sed 's/^/  /')
+        If it is specforge-worker: docker compose -f deploy/docker/docker-compose.yml logs --tail=30 worker"
 	fi
 else
 	no "Prometheus is scraping" "no active targets at $PROM"
