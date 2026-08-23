@@ -152,7 +152,11 @@ run-worker: ## Run the worker against the development stack
 
 .PHONY: dev
 dev: ## Start the full local stack, migrate and seed
-	$(COMPOSE) up -d --build
+	@# --remove-orphans clears containers for services that are no longer in the
+	@# compose file. Without it, a stack upgraded across the MinIO removal keeps
+	@# running MinIO forever: nothing uses it, nothing says so, and it still holds
+	@# ports 9000-9001.
+	$(COMPOSE) up -d --build --remove-orphans
 	@echo "waiting for the database..."
 	@$(COMPOSE) exec -T postgres bash -c 'until pg_isready -U specforge -q; do sleep 1; done'
 	$(MAKE) migrate
