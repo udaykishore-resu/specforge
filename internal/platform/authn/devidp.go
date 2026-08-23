@@ -40,6 +40,20 @@ type DevIdP struct {
 	tenantClaim string
 	rolesClaim  string
 
+	// resolveTenant answers "which tenant do the development accounts belong
+	// to" at the moment a token is issued, rather than at startup.
+	//
+	// A tenant id frozen into the process at boot is wrong the instant the
+	// database is reseeded, and it fails four layers away: the provider mints a
+	// token naming a tenant that no longer exists, and the API returns a 503
+	// from a foreign key on the principals table. Resolving late means the
+	// answer is right whenever the question is asked.
+	resolveTenant func() string
+
+	tenantMu     sync.Mutex
+	tenantCache  string
+	tenantCached time.Time
+
 	mu    sync.Mutex
 	codes map[string]*devCode
 }
@@ -82,6 +96,9 @@ type DevIdPOptions struct {
 	Users        []DevUser
 	TenantClaim  string
 	RolesClaim   string
+	// ResolveTenant is consulted when a token is issued. When it is nil, or
+	// returns "", each user's own TenantID is used. See DevIdP.resolveTenant.
+	ResolveTenant func() string
 }
 
 // DefaultDevUsers seeds one identity per platform role, so every authorization
@@ -127,12 +144,13 @@ func NewDevIdP(opts DevIdPOptions) (*DevIdP, error) {
 		clients: map[string]devClient{
 			opts.ClientID: {ID: opts.ClientID, Secret: opts.ClientSecret, RedirectURIs: opts.RedirectURIs},
 		},
-		users:       opts.Users,
-		key:         key,
-		keyID:       id.NewToken(8),
-		codes:       map[string]*devCode{},
-		tenantClaim: opts.TenantClaim,
-		rolesClaim:  opts.RolesClaim,
+		users:         opts.Users,
+		key:           key,
+		keyID:         id.NewToken(8),
+		codes:         map[string]*devCode{},
+		resolveTenant: opts.ResolveTenant,
+		tenantClaim:   opts.TenantClaim,
+		rolesClaim:    opts.RolesClaim,
 	}
 	return idp, nil
 }
@@ -368,7 +386,35 @@ func (d *DevIdP) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *DevIdP) handleUsers(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, d.users)
+	// Report the tenant a token would actually carry, not the one configured at
+	// startup — otherwise this endpoint is a way to be confidently misinformed.
+	out := make([]DevUser, len(d.users))
+	for i, u := range d.users {
+		u.TenantID = d.tenantFor(u)
+		out[i] = u
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// tenantFor resolves the tenant a token should name.
+//
+// The five-second cache keeps a burst of sign-ins from becoming a burst of
+// queries, while staying short enough that a reseed during development is
+// picked up before anyone notices.
+func (d *DevIdP) tenantFor(u DevUser) string {
+	if d.resolveTenant == nil {
+		return u.TenantID
+	}
+	d.tenantMu.Lock()
+	defer d.tenantMu.Unlock()
+	if d.tenantCache != "" && time.Since(d.tenantCached) < 5*time.Second {
+		return d.tenantCache
+	}
+	if resolved := d.resolveTenant(); resolved != "" {
+		d.tenantCache, d.tenantCached = resolved, time.Now()
+		return resolved
+	}
+	return u.TenantID
 }
 
 // issueToken mints an RS256-signed JWT.
@@ -384,7 +430,7 @@ func (d *DevIdP) issueToken(u DevUser, audience, nonce string, ttl time.Duration
 		"auth_time": now.Unix(), "jti": id.NewToken(12),
 		"email": u.Email, "email_verified": true, "name": u.Name,
 		"amr": amr, "groups": u.Groups,
-		d.tenantClaim: u.TenantID,
+		d.tenantClaim: d.tenantFor(u),
 		d.rolesClaim:  u.Groups,
 	}
 	if nonce != "" {

@@ -15,29 +15,27 @@ part by hand.
 
 ---
 
-## Before anything else: the tenant claim
+## The tenant the development accounts belong to
 
-The development identity provider issues tokens scoped to the tenant the seeder
-created, and it reads that tenant from `SF_DEV_TENANT_ID` **at startup**. If the
-API process never saw it, every token is tenantless, the console shows *No
-tenant context*, and every other check fails for a reason that nothing points
-at.
+The development identity provider looks this up by slug when it issues a token
+— `SF_DEV_TENANT_SLUG`, default `acme` — rather than being handed an id at
+startup. That matters because an id frozen into the process is wrong the moment
+the database is reseeded, and the failure surfaces three layers away as a 503
+from a foreign key on `principals`. Resolving late means it is right whenever
+the question is asked, with no restart after `make seed`.
 
-`make dev` now wires this itself: it reads the id back from the database after
-seeding, writes it to `deploy/docker/.env`, and restarts the API. Confirm it
-took:
-
-```bash
-docker compose -f deploy/docker/docker-compose.yml exec api env | grep SF_DEV_TENANT_ID
-```
-
-If it is empty, exporting the variable in your own shell will not help — the
-value has to reach the container:
+To check what a token will carry:
 
 ```bash
-echo "SF_DEV_TENANT_ID=$(make -s tenant-id)" > deploy/docker/.env
-docker compose -f deploy/docker/docker-compose.yml up -d api
+curl -s localhost:8081/users | head -c 200      # the tenant each account resolves to
+make tenant-id                                  # what the database actually holds
 ```
+
+Those two must agree. If `/users` shows an empty tenant, the seeder has not run.
+
+`SF_DEV_TENANT_ID` still pins a specific tenant when you want one. If it names a
+tenant that does not exist, the provider logs a warning once and falls back to
+the slug rather than minting tokens for a tenant that is gone.
 
 ## Getting a token
 

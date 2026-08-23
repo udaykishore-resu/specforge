@@ -190,11 +190,15 @@ services:
       # mistake nobody makes twice but everybody makes once.
       SF_AUTH_DEV_IDP: "true"
       SF_AUTH_DEV_IDP_ADDR: ":8081"
-      # The tenant the development accounts belong to. `make dev` writes it to
-      # deploy/docker/.env after seeding and restarts this service, because a
-      # token without a tenant claim produces a console with no tenant context
-      # and a stack that looks broken for a reason nothing points at.
+      # Which tenant the development accounts belong to.
+      #
+      # Normally unset: the provider looks the tenant up by slug when it issues
+      # a token, so it stays correct across a reseed with no restart and no
+      # value to go stale. Set SF_DEV_TENANT_ID to pin a specific tenant; if it
+      # names one that does not exist, the provider says so and falls back to
+      # the slug rather than minting tokens for a tenant that is gone.
       SF_DEV_TENANT_ID: "${SF_DEV_TENANT_ID:-}"
+      SF_DEV_TENANT_SLUG: "acme"
       SF_AUTH_ISSUER: "http://localhost:8081"
       SF_AUTH_REDIRECT_URL: "http://localhost:3000/api/auth/callback"
       SF_OTEL_ENDPOINT: "http://otel-collector:4318"

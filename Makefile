@@ -157,14 +157,13 @@ dev: ## Start the full local stack, migrate and seed
 	@$(COMPOSE) exec -T postgres bash -c 'until pg_isready -U specforge -q; do sleep 1; done'
 	$(MAKE) migrate
 	$(MAKE) seed
-	@# The development identity provider must issue tokens scoped to the tenant
-	@# the seeder just created, and it reads that from its environment at
-	@# startup. Wiring it here rather than telling the developer to export it
-	@# removes the one step that, if skipped, makes everything else look broken.
-	@tenant=$$($(MAKE) -s tenant-id); \
-		echo "SF_DEV_TENANT_ID=$$tenant" > deploy/docker/.env; \
-		echo "wiring the development identity provider to tenant $$tenant"
-	$(COMPOSE) up -d api
+	@# No tenant id is pinned anywhere. The development identity provider looks
+	@# the tenant up by slug when it issues a token, so it is correct after a
+	@# reseed without a restart — and an id left over from a previous database
+	@# cannot outlive it. A stale deploy/docker/.env from an older checkout would
+	@# still be read by compose, so it goes.
+	@rm -f deploy/docker/.env
+	@echo "development accounts resolve to tenant $$($(MAKE) -s tenant-id)"
 	@echo
 	@echo "  API        http://localhost:8080"
 	@echo "  Web        http://localhost:3000"

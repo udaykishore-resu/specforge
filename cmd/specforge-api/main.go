@@ -88,7 +88,7 @@ func run() error {
 	}
 
 	// --- Identity -----------------------------------------------------------
-	keys, issuer, audience, devIdP, err := setupIdentity(ctx, &cfg, logger)
+	keys, issuer, audience, devIdP, err := setupIdentity(ctx, &cfg, database, logger)
 	if err != nil {
 		return err
 	}
@@ -164,14 +164,57 @@ func openPublisher(cfg config.Config, logger *slog.Logger) (outbox.Publisher, er
 	}
 }
 
+// devTenantResolver answers which tenant the development accounts belong to,
+// asked afresh each time a token is issued.
+//
+// Order: an explicit SF_DEV_TENANT_ID if that tenant actually exists, then the
+// tenant named by SF_DEV_TENANT_SLUG (default "acme"). The existence check is
+// the point — an id left over from a previous database is worse than no id at
+// all, because it produces tokens that look correct and fail on a foreign key
+// three layers down.
+func devTenantResolver(database *db.DB, logger *slog.Logger) func() string {
+	slug := os.Getenv("SF_DEV_TENANT_SLUG")
+	if slug == "" {
+		slug = "acme"
+	}
+	warned := false
+
+	return func() string {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+
+		if configured := os.Getenv("SF_DEV_TENANT_ID"); configured != "" {
+			var exists bool
+			err := database.SQL().QueryRowContext(ctx,
+				`SELECT EXISTS (SELECT 1 FROM tenants WHERE id = $1)`, configured).Scan(&exists)
+			if err == nil && exists {
+				return configured
+			}
+			if err == nil && !warned {
+				warned = true
+				logger.Warn("SF_DEV_TENANT_ID names a tenant that does not exist; "+
+					"falling back to a lookup by slug",
+					"configured", configured, "slug", slug)
+			}
+		}
+
+		var id string
+		if err := database.SQL().QueryRowContext(ctx,
+			`SELECT id::text FROM tenants WHERE slug = $1`, slug).Scan(&id); err != nil {
+			return ""
+		}
+		return id
+	}
+}
+
 // setupIdentity resolves the token verification key source.
 //
 // In development the built-in provider supplies it; in every other environment
 // the enterprise issuer's JWKS does. The dev provider refuses to run in
 // production, and the configuration validator refuses to start a production
 // process with it enabled, so there are two independent guards.
-func setupIdentity(ctx context.Context, cfg *config.Config, logger *slog.Logger) (
-	authn.KeySource, string, string, *authn.DevIdP, error) {
+func setupIdentity(ctx context.Context, cfg *config.Config, database *db.DB,
+	logger *slog.Logger) (authn.KeySource, string, string, *authn.DevIdP, error) {
 
 	if cfg.Auth.DevIdP {
 		if cfg.Env.IsProduction() {
@@ -195,9 +238,10 @@ func setupIdentity(ctx context.Context, cfg *config.Config, logger *slog.Logger)
 
 		idp, err := authn.NewDevIdP(authn.DevIdPOptions{
 			Issuer: issuer, ClientID: clientID,
-			RedirectURIs: redirects,
-			Users:        authn.DefaultDevUsers(os.Getenv("SF_DEV_TENANT_ID")),
-			TenantClaim:  cfg.Auth.TenantClaim, RolesClaim: cfg.Auth.RolesClaim,
+			RedirectURIs:  redirects,
+			Users:         authn.DefaultDevUsers(os.Getenv("SF_DEV_TENANT_ID")),
+			ResolveTenant: devTenantResolver(database, logger),
+			TenantClaim:   cfg.Auth.TenantClaim, RolesClaim: cfg.Auth.RolesClaim,
 		})
 		if err != nil {
 			return nil, "", "", nil, fmt.Errorf("starting the development identity provider: %w", err)

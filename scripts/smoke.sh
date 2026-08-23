@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Verify a running local stack, end to end.
 #
-# `make dev` prints six URLs. This checks all of them, and then checks the
-# things the URLs exist to serve: that a token carries a tenant, that the API
+# `make dev` prints the URLs it started. This checks all of them, and then the
+# things they exist to serve: that a token carries a tenant, that the API
 # enforces the permission each route declares, that separation of duties holds,
 # that the audit chain verifies, that traces reach Jaeger and that metrics reach
 # Prometheus. Every check is a real request against the running system — nothing
@@ -207,8 +207,9 @@ if [ -n "$TENANT" ]; then
 	ok "tokens carry a tenant: $TENANT"
 else
 	no "tokens carry a tenant" \
-		"SF_DEV_TENANT_ID did not reach the API process, so every request below will be tenantless.
-        Set it in the api service's environment and restart:  docker compose -f deploy/docker/docker-compose.yml up -d api"
+		"The provider could not resolve a tenant, so every request below is tenantless.
+        It looks one up by slug (SF_DEV_TENANT_SLUG, default acme), so this
+        usually means the seeder has not run:  make seed"
 	printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 	exit 1
 fi
@@ -222,11 +223,25 @@ auth_status() {
 }
 
 ME="$(auth "$OWNER" "$API/api/v1/auth/me")"
-if printf '%s' "$ME" | grep -q '"tenant_id"'; then
+case "$ME" in
+*'"tenant_id"'*)
 	ok "GET /auth/me resolves the principal and its roles"
-else
+	;;
+*principal.create_failed*)
+	# Almost always one thing: the token names a tenant that is not in the
+	# database, so provisioning the principal trips the foreign key. Say that,
+	# rather than making someone read a 503 and go looking.
+	no "GET /auth/me resolves the principal and its roles" \
+		"The token names tenant $TENANT, and the principal could not be created for it.
+        Check that tenant actually exists:
+          psql \"\$SF_DB_DSN\" -c \"SELECT id, slug FROM tenants\"
+        If it does not, the API is issuing tokens for a tenant from a previous
+        database. Re-run: make dev"
+	;;
+*)
 	no "GET /auth/me resolves the principal and its roles" "${ME:-no response}"
-fi
+	;;
+esac
 
 # A forged token must be refused. The API verifies against the JWKS with an
 # asymmetric algorithm only, so a token signed with `none` or with a symmetric

@@ -388,3 +388,60 @@ func containsStr(list []string, want string) bool {
 	}
 	return false
 }
+
+// A tenant id frozen at startup is wrong the moment the database is reseeded,
+// and the failure surfaces three layers away as a foreign key violation on the
+// principals table. Resolving late is what prevents that, so this asserts the
+// resolution actually happens per token rather than once.
+func TestDevIdPResolvesTenantAtIssueTime(t *testing.T) {
+	t.Parallel()
+
+	current := "11111111-1111-4111-8111-111111111111"
+	calls := 0
+
+	idp, err := authn.NewDevIdP(authn.DevIdPOptions{
+		Issuer: "http://127.0.0.1:8081", ClientID: "specforge-web",
+		RedirectURIs: []string{"http://localhost:3000/api/auth/callback"},
+		// The users carry a stale id, as they would after a reseed.
+		Users:         authn.DefaultDevUsers("00000000-0000-4000-8000-000000000000"),
+		TenantClaim:   "https://specforge.io/tenant",
+		RolesClaim:    "https://specforge.io/roles",
+		ResolveTenant: func() string { calls++; return current },
+	})
+	if err != nil {
+		t.Fatalf("dev idp: %v", err)
+	}
+
+	tenantOf := func() string {
+		srv := httptest.NewServer(idp.Handler())
+		defer srv.Close()
+		resp, err := http.Get(srv.URL + "/users")
+		if err != nil {
+			t.Fatalf("users: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		var users []authn.DevUser
+		if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(users) == 0 {
+			t.Fatal("no seeded accounts")
+		}
+		return users[0].TenantID
+	}
+
+	if got := tenantOf(); got != current {
+		t.Fatalf("tenant %q, want the resolved %q — a stale id reached the token", got, current)
+	}
+	if calls == 0 {
+		t.Fatal("the resolver was never consulted")
+	}
+
+	// Reseed. Without waiting out the cache the old answer is still correct;
+	// after it, the new one must win without restarting anything.
+	current = "22222222-2222-4222-8222-222222222222"
+	time.Sleep(5100 * time.Millisecond)
+	if got := tenantOf(); got != current {
+		t.Fatalf("after a reseed the tenant is %q, want %q", got, current)
+	}
+}
