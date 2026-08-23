@@ -99,6 +99,22 @@ func run() error {
 		go serveDevIdP(ctx, cfg, devIdP, logger)
 	}
 
+	// The metrics listener is separate from the API's own /metrics route.
+	//
+	// Both serve the same registry; they differ in who can reach them. The
+	// route on the public listener is convenient for a developer with curl,
+	// and the dedicated address is what Prometheus is pointed at and what a
+	// deployment can bind somewhere only the scraper reaches. SF_METRICS_ADDR
+	// was previously read and never used, so the scrape target named in
+	// prometheus.yml had nothing listening on it.
+	if cfg.Obs.MetricsAddr != "" {
+		go func() {
+			if err := obs.ServeMetrics(ctx, cfg.Obs.MetricsAddr, logger, database.RecordPoolMetrics); err != nil {
+				logger.Error("metrics endpoint stopped", "error", err)
+			}
+		}()
+	}
+
 	// --- Server -------------------------------------------------------------
 	srv, err := server.New(server.Dependencies{
 		Config: cfg, DB: database, Cache: cacheStore,

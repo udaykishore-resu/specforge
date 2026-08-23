@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -72,6 +73,28 @@ func run(roles []string) error {
 		store, cfg.ObjStore.EvidenceBucket)
 
 	var wg sync.WaitGroup
+
+	// Metrics first, and on its own listener: the worker has no other HTTP
+	// surface, so without this the outbox depth, the age of the oldest
+	// unpublished event and the audit chain's validity are all invisible, and
+	// the alerts that watch them can never fire.
+	if cfg.Obs.MetricsAddr != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := obs.ServeMetrics(ctx, cfg.Obs.MetricsAddr, logger, database.RecordPoolMetrics); err != nil {
+				logger.Error("metrics endpoint stopped", "error", err)
+			}
+		}()
+	}
+
+	// The worker starts alongside the migration job, so on a fresh deployment
+	// the schema may not exist for a few seconds. Waiting is the difference
+	// between a clean startup and a burst of alarming errors about missing
+	// tables that resolve themselves.
+	if err := waitForSchema(ctx, database, logger); err != nil {
+		return err
+	}
 	enabled := map[string]bool{}
 	for _, r := range roles {
 		enabled[strings.TrimSpace(r)] = true
@@ -149,6 +172,43 @@ func run(roles []string) error {
 }
 
 // every runs fn on an interval until the context is cancelled.
+// waitForSchema blocks until the migrations have been applied.
+//
+// It gives up after two minutes rather than waiting forever: a worker that
+// never becomes useful should say so and let the orchestrator restart it, not
+// sit silently in a loop that looks like health.
+func waitForSchema(ctx context.Context, database *db.DB, logger *slog.Logger) error {
+	const probe = `SELECT 1 FROM tenants LIMIT 1`
+
+	deadline := time.Now().Add(2 * time.Minute)
+	announced := false
+	for {
+		var one int
+		err := database.SQL().QueryRowContext(ctx, probe).Scan(&one)
+		if err == nil || err == sql.ErrNoRows {
+			if announced {
+				logger.Info("schema is ready")
+			}
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("the schema is still not present after two minutes: %w", err)
+		}
+		if !announced {
+			announced = true
+			logger.Info("waiting for the migrations to be applied")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
 // every runs fn immediately and then on an interval.
 //
 // Immediately matters. With a ticker alone, an hourly job does nothing for its
