@@ -40,13 +40,15 @@ ok() {
 no() {
 	fail=$((fail + 1))
 	printf '  %s  %s\n' "$(red FAIL)" "$1"
-	[ $# -gt 1 ] && printf '        %s\n' "$2"
+	# Indent every line of the detail, not just the first: a multi-line
+	# explanation that loses its alignment halfway reads as two messages.
+	[ $# -gt 1 ] && printf '%s\n' "$2" | sed 's/^/        /'
 	return 0
 }
 sk() {
 	skip=$((skip + 1))
 	printf '  %s  %s\n' "$(grey SKIP)" "$1"
-	[ $# -gt 1 ] && printf '        %s\n' "$2"
+	[ $# -gt 1 ] && printf '%s\n' "$2" | sed 's/^/        /'
 	return 0
 }
 section() { printf '\n%s\n' "$1"; }
@@ -429,8 +431,31 @@ if printf '%s' "$TARGETS" | grep -q '"health":"up"'; then
 	if [ -z "$DOWN" ]; then
 		ok "every Prometheus target is up"
 	else
-		no "every Prometheus target is up" "$(printf '%s' "$DOWN" | sed 's/^/  /')
-        If it is specforge-worker: docker compose -f deploy/docker/docker-compose.yml logs --tail=30 worker"
+		# The two failures mean different things and want different commands.
+		# "no such host" is Docker DNS: the container is not there at all, so
+		# there are no logs to read. "connection refused" means it is there and
+		# nothing is listening on that port — usually an image built before the
+		# metrics listener existed.
+		HINT="docker compose -f deploy/docker/docker-compose.yml ps -a"
+		case "$DOWN" in
+		*"no such host"*)
+			HINT="$HINT
+A target resolved to no host: that container does not exist. Start it:
+  docker compose -f deploy/docker/docker-compose.yml up -d"
+			;;
+		esac
+		case "$DOWN" in
+		*"connection refused"*)
+			HINT="$HINT
+A target refused the connection: the container is up but nothing is listening on
+that port. If it has not been rebuilt since the metrics listener was added:
+  docker compose -f deploy/docker/docker-compose.yml up -d --build
+Confirm with:  docker compose ... logs api | grep 'metrics listening'"
+			;;
+		esac
+		no "every Prometheus target is up" "$DOWN
+
+$HINT"
 	fi
 else
 	no "Prometheus is scraping" "no active targets at $PROM"
