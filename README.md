@@ -1069,4 +1069,4 @@ pipeline, code and test synchronisation, the evidence pack exporter — is in
 
 ## License
 
-Proprietary.
+MIT — see [LICENSE](LICENSE).
