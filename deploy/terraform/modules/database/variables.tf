@@ -46,13 +46,13 @@ variable "parameter_group_family" {
 }
 
 variable "database_name" {
-  type        = string
-  default     = "specforge"
+  type    = string
+  default = "specforge"
 }
 
 variable "master_username" {
-  type        = string
-  default     = "specforge_admin"
+  type    = string
+  default = "specforge_admin"
 }
 
 variable "instance_count" {

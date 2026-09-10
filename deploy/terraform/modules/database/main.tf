@@ -128,13 +128,13 @@ resource "aws_secretsmanager_secret_version" "master" {
 }
 
 resource "aws_rds_cluster" "this" {
-  cluster_identifier     = "${var.name_prefix}-aurora"
-  engine                 = "aurora-postgresql"
-  engine_version         = var.engine_version
-  database_name          = var.database_name
-  master_username        = var.master_username
-  master_password        = random_password.master.result
-  port                   = 5432
+  cluster_identifier = "${var.name_prefix}-aurora"
+  engine             = "aurora-postgresql"
+  engine_version     = var.engine_version
+  database_name      = var.database_name
+  master_username    = var.master_username
+  master_password    = random_password.master.result
+  port               = 5432
 
   db_subnet_group_name            = aws_db_subnet_group.this.name
   vpc_security_group_ids          = var.security_group_ids
@@ -171,11 +171,11 @@ resource "aws_rds_cluster" "this" {
 resource "aws_rds_cluster_instance" "this" {
   count = var.instance_count
 
-  identifier          = "${var.name_prefix}-aurora-${count.index}"
-  cluster_identifier  = aws_rds_cluster.this.id
-  instance_class      = var.instance_class
-  engine              = aws_rds_cluster.this.engine
-  engine_version      = aws_rds_cluster.this.engine_version
+  identifier           = "${var.name_prefix}-aurora-${count.index}"
+  cluster_identifier   = aws_rds_cluster.this.id
+  instance_class       = var.instance_class
+  engine               = aws_rds_cluster.this.engine
+  engine_version       = aws_rds_cluster.this.engine_version
   db_subnet_group_name = aws_db_subnet_group.this.name
 
   performance_insights_enabled          = true

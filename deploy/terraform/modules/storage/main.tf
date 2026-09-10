@@ -29,7 +29,7 @@ terraform {
 
 locals {
   tags = merge(var.tags, {
-    "specforge.io/component" = "storage"
+    "specforge.io/component"  = "storage"
     "specforge.io/managed-by" = "terraform"
   })
 }

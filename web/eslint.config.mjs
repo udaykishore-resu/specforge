@@ -1,14 +1,23 @@
-import { dirname } from 'path'
-import { fileURLToPath } from 'url'
-import { FlatCompat } from '@eslint/eslintrc'
+import nextCoreWebVitals from 'eslint-config-next/core-web-vitals'
+import nextTypescript from 'eslint-config-next/typescript'
 
-const compat = new FlatCompat({ baseDirectory: dirname(fileURLToPath(import.meta.url)) })
-
-export default [
-  ...compat.extends('next/core-web-vitals', 'next/typescript'),
+const config = [
+  ...nextCoreWebVitals,
+  ...nextTypescript,
+  {
+    ignores: ['.next/**', 'out/**', 'next-env.d.ts'],
+  },
   {
     rules: {
       '@typescript-eslint/no-explicit-any': 'error',
+    },
+  },
+  {
+    // Client components live under src/components. Route handlers, server
+    // components and server actions under src/app are allowed to touch the
+    // session; a client bundle never is.
+    files: ['src/components/**/*.{ts,tsx}'],
+    rules: {
       'no-restricted-imports': [
         'error',
         {
@@ -25,3 +34,5 @@ export default [
     },
   },
 ]
+
+export default config

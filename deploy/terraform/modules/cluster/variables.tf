@@ -5,9 +5,9 @@ variable "kubernetes_version" {
   default = "1.31"
 }
 
-variable "private_subnet_ids"     { type = list(string) }
+variable "private_subnet_ids" { type = list(string) }
 variable "node_security_group_id" { type = string }
-variable "kms_key_arn"            { type = string }
+variable "kms_key_arn" { type = string }
 
 variable "public_endpoint_enabled" {
   type        = bool
@@ -51,8 +51,8 @@ variable "service_account_name" {
   default = "specforge"
 }
 
-variable "content_bucket_arn"      { type = string }
-variable "evidence_bucket_arn"     { type = string }
+variable "content_bucket_arn" { type = string }
+variable "evidence_bucket_arn" { type = string }
 variable "audit_anchor_bucket_arn" { type = string }
 
 variable "secret_arns" {
