@@ -231,6 +231,11 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # gitleaks-action scans the commit range of a push/PR with
+          # `git log base^..head`, which needs the full history; a shallow
+          # checkout makes that range an "unknown revision".
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
