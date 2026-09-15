@@ -41,6 +41,10 @@ ENV NEXT_TELEMETRY_DISABLED=1 \
     SPECFORGE_REDIRECT_URL=http://localhost:3000/api/auth/callback
 
 RUN npm run build
+# The console has no static assets under web/public yet, and COPY fails on a
+# missing source; guarantee the directory so the runtime stage below stays
+# correct whether or not assets are added later.
+RUN mkdir -p /app/public
 
 # ------------------------------------------------------------- runtime ------
 FROM node:22-alpine AS runtime
