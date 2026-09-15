@@ -54,7 +54,7 @@ tests and deployments — and it can answer, from data rather than from memory:
 
 ## Quick start
 
-Requirements: Docker with Compose, and Make. Go 1.24 and Node 22 if you intend
+Requirements: Docker with Compose, and Make. Go 1.26 and Node 22 if you intend
 to run things outside containers.
 
 ```bash

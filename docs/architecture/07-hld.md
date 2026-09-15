@@ -51,7 +51,7 @@ C4Container
   }
 
   Container_Boundary(plane, "Control Plane") {
-    Container(api, "specforge-api", "Go 1.24, modular monolith", "REST v1, SSE/WebSocket, OpenAPI; hosts all bounded contexts as modules")
+    Container(api, "specforge-api", "Go 1.26, modular monolith", "REST v1, SSE/WebSocket, OpenAPI; hosts all bounded contexts as modules")
     Container(worker, "specforge-worker", "Go", "Async: generation, reverse engineering, drift, scans, correlation, projections, outbox relay")
     Container(gw, "specforge-gateway", "Go", "AI Gateway: pre/post guardrail chain, provider routing, budgets, cost ledger")
     Container(gr, "Guardrail sidecars", "Containers", "Presidio, Llama Guard, custom — standard gRPC/HTTP interface")
