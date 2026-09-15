@@ -56,6 +56,19 @@ LABEL org.opencontainers.image.title="specforge-web" \
 
 WORKDIR /app
 
+# Runtime hardening, and what keeps the image scan honest:
+#  - apk upgrade picks up Alpine security fixes published after the node:22
+#    image was cut (libssl/libcrypto in particular).
+#  - The standalone Next.js server only needs the `node` binary. npm, npx,
+#    corepack and the bundled yarn are package-manager tooling whose own
+#    dependency tree (tar, pacote, sigstore, ...) is scanned like any other
+#    code in the image and regularly carries HIGH/CRITICAL advisories that have
+#    nothing to do with this application, so they are removed.
+RUN apk upgrade --no-cache \
+ && rm -rf /usr/local/lib/node_modules \
+           /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack \
+           /opt/yarn* /usr/local/bin/yarn /usr/local/bin/yarnpkg
+
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000 \
