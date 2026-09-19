@@ -11,7 +11,7 @@
 # variables at run time. Neither is ever baked into the image.
 
 # ---------------------------------------------------------------- deps ------
-FROM node:22-alpine AS deps
+FROM node:25-alpine AS deps
 
 WORKDIR /app
 COPY web/package.json web/package-lock.json* ./
@@ -21,7 +21,7 @@ RUN if [ -f package-lock.json ]; then npm ci --omit=dev --no-audit --no-fund; \
     else npm install --omit=dev --no-audit --no-fund; fi
 
 # --------------------------------------------------------------- build ------
-FROM node:22-alpine AS build
+FROM node:25-alpine AS build
 
 WORKDIR /app
 COPY web/package.json web/package-lock.json* ./
@@ -47,7 +47,7 @@ RUN npm run build
 RUN mkdir -p /app/public
 
 # ------------------------------------------------------------- runtime ------
-FROM node:22-alpine AS runtime
+FROM node:25-alpine AS runtime
 
 LABEL org.opencontainers.image.title="specforge-web" \
       org.opencontainers.image.description="SpecForge console" \
